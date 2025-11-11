@@ -1,0 +1,16 @@
+[
+  {
+    "id": "aurora",
+    "name": "Aurora",
+    "image_png": "assets/doors/aurora.png",
+    "default_colors": ["#FFFFFF", "#F3F0E6", "#1E1E1E"],
+    "tags": ["modern", "panel"]
+  },
+  {
+    "id": "kyoto",
+    "name": "Kyoto",
+    "image_png": "assets/doors/kyoto.png",
+    "default_colors": ["#E5D3B3", "#B28A5A", "#2D2D2D"],
+    "tags": ["japandi", "slatted"]
+  }
+]
