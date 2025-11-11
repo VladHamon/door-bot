@@ -17,6 +17,12 @@ from aiogram.fsm.context import FSMContext
 from PIL import Image
 from aiogram.types import BufferedInputFile
 
+
+from aiogram.types import BufferedInputFile, FSInputFile
+from uuid import uuid4
+from pathlib import Path
+from fastapi import FastAPI, Request
+
 # ------------ env ------------
 load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -317,9 +323,11 @@ async def typed_color(m: Message, state: FSMContext):
     await generate_and_send(m, state)
 
 async def generate_and_send(m: Message, state: FSMContext):
+    # Проверяем подписку
     if not await ensure_subscribed(m.from_user.id):
         await m.answer("Сначала подпишись на канал и вернись с /start.")
         return
+
     await state.set_state(Flow.generating)
     data = await state.get_data()
     interior = Path(data["interior_path"])
@@ -329,13 +337,27 @@ async def generate_and_send(m: Message, state: FSMContext):
 
     await m.answer("Генерирую…")
 
-    scene = await describe_scene_with_openai(interior)
-    img_bytes = await gemini_generate(interior, door_png, color, scene, aspect="2:3")
-  
-    file = BufferedInputFile(img_bytes, filename="result.png")  # имя нужно для Telegram
-    await m.answer_photo(photo=img_bytes, caption=f"{door['name']} — цвет: {color}")
-    await state.clear()
-    await m.answer("Готово! Пришли новое фото, чтобы попробовать ещё.")
+    try:
+        # Получаем сцену и генерируем изображение
+        scene = await describe_scene_with_openai(interior)
+        img_bytes = await gemini_generate(interior, door_png, color, scene, aspect="2:3")
+
+        # Оборачиваем байты в InputFile
+        try:
+            file = BufferedInputFile(img_bytes, filename="result.png")
+            await m.answer_photo(photo=file, caption=f"{door['name']} — цвет: {color}")
+        except Exception:
+            # Запасной путь — сохранить во временный файл
+            tmp_path = Path("/tmp") / f"{uuid4().hex}.png"
+            tmp_path.write_bytes(img_bytes)
+            file = FSInputFile(tmp_path, filename="result.png")
+            await m.answer_photo(photo=file, caption=f"{door['name']} — цвет: {color}")
+
+        await state.clear()
+        await m.answer("Готово! Пришли новое фото, чтобы попробовать ещё.")
+    except Exception as e:
+        print("GENERATION_ERROR:", repr(e))
+        await m.answer("⚠️ Не удалось сгенерировать изображение. Попробуй другой кадр или позже.")
 
 # ------------ FastAPI + webhook ------------
 app = FastAPI()
@@ -345,3 +367,4 @@ async def telegram_webhook(request: Request):
     update = await request.json()
     await dp.feed_webhook_update(bot, update)
     return {"ok": True}
+
