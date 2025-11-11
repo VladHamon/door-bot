@@ -193,12 +193,18 @@ async def gemini_generate(
     # Ищем картинку в ответе
     for part in resp.parts:
         if getattr(part, "inline_data", None):
-            out_img = part.as_image()  # PIL.Image
-            buf = io.BytesIO()
-            out_img.save(buf, "PNG")
-            return buf.getvalue()
-
-    raise RuntimeError("Gemini did not return an image. Try another prompt or check quota.")
+            data = getattr(part.inline_data, "data", None)
+            if data:
+              return data
+            try:
+              out_img = part.as_image()
+              buf = io.BytesIO()
+              out_img.save(buf)
+              return buf.getvalue()
+            except Exception:
+              continue
+              
+    raise RuntimeError("Gemini did not return an image bytes payload.")
   
 
 async def nanobanana_generate(base_image: Path, door_png: Path, color: str,
