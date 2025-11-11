@@ -195,7 +195,7 @@ async def gemini_generate(
         if getattr(part, "inline_data", None):
             out_img = part.as_image()  # PIL.Image
             buf = io.BytesIO()
-            out_img.save(buf, format="PNG")
+            out_img.save(buf, "PNG")
             return buf.getvalue()
 
     raise RuntimeError("Gemini did not return an image. Try another prompt or check quota.")
