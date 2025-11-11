@@ -1,3 +1,5 @@
+from google import genai
+from google.genai import types
 import os, json, re, io, asyncio, uuid, base64
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -19,6 +21,7 @@ load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 NANOBANANA_API_KEY = os.environ["NANOBANANA_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "@yourdoorshop")  # @username
 
@@ -132,6 +135,75 @@ Return JSON only.
         return {"style_keywords": [], "materials_palette_hex": []}
 
 # ------------ NaNobanana: генерация ------------
+
+async def gemini_generate(
+    base_image: Path, door_png: Path, color: str, scene: Dict[str, Any], aspect: str = "2:3"
+) -> bytes:
+    """
+    Генерация (редактирование/компоновка) изображения через Google Gemini.
+    Передаём: текстовый промпт + фото интерьера + PNG двери.
+    Возвращаем: bytes готовой картинки (PNG).
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    # Составляем промпт из анализа сцены + требований к двери
+    style_keywords = ", ".join(scene.get("style_keywords", []))
+    walls_hex = scene.get("surfaces", {}).get("walls", {}).get("color_hex", "beige")
+    floor = scene.get("surfaces", {}).get("floor", {})
+    floor_material = floor.get("material", "oak")
+    floor_pattern = floor.get("pattern", "herringbone")
+    lighting = scene.get("lighting", {}).get("key_light", "soft daylight from left")
+    palette = scene.get("materials_palette_hex", [])
+
+    prompt = (
+        "You are a photorealistic image editor. Compose a new image by integrating the DOOR IMAGE "
+        "into the provided INTERIOR IMAGE with high realism.\n\n"
+        "HARD REQUIREMENTS:\n"
+        "- Place the door on the end wall as the main, unobstructed subject (frontal, one-point perspective, eye level, ~35mm look).\n"
+        f"- Recolor only the door leaf to {color}; preserve original panels, glazing, material grain, and hardware.\n"
+        "- Keep verticals straight, scale realistic (~2.0–2.1 m door height). No occlusion by decor. Do not add extra doors.\n"
+        "- Maintain scene style, lighting, and palette exactly as the interior photo.\n\n"
+        "SCENE HINTS FROM ANALYSIS:\n"
+        f"- Style: {style_keywords}\n"
+        f"- Walls: {walls_hex} matte with white casings/moldings.\n"
+        f"- Floor: {floor_material} {floor_pattern} matte.\n"
+        f"- Metals: brushed brass, matte black.\n"
+        f"- Lighting: {lighting} + warm wall sconce glow when present.\n"
+        f"- Palette: {palette}\n\n"
+        "QUALITY:\n"
+        "Ultra-realistic PBR materials, natural GI, accurate contact shadows, no halos, no plastic shine.\n"
+        "Negative: glare, over-sharpening, extra clutter, people, text, logos.\n"
+    )
+
+    # Загружаем изображения (Gemini принимает PIL Image)
+    interior_img = Image.open(base_image)
+    door_img = Image.open(door_png)
+
+    # Просим вернуть только КАРТИНКУ (без текста), и ставим формат кадра
+    cfg = types.GenerateContentConfig(
+        response_modalities=["Image"],
+        image_config=types.ImageConfig(aspect_ratio=aspect)  # варианты: "2:3", "3:2", "16:9", ...
+    )
+
+    # Важно: порядок. Сначала текст, затем оба изображения.
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-image",
+        contents=[prompt, interior_img, door_img],
+        config=cfg,
+    )
+
+    # Ответ может содержать несколько частей; ищем картинку
+    for part in resp.parts:
+        if part.inline_data is not None:
+            out_img = part.as_image()  # PIL.Image
+            buf = io.BytesIO()
+            out_img.save(buf, format="PNG")
+            return buf.getvalue()
+
+    # Если не пришло изображение
+    raise RuntimeError("Gemini did not return an image. Try another prompt or check API quota.")
+
+
 async def nanobanana_generate(base_image: Path, door_png: Path, color: str,
                               scene: Dict[str,Any], seed: Optional[int] = None) -> bytes:
     """
@@ -254,7 +326,7 @@ async def generate_and_send(m: Message, state: FSMContext):
     await m.answer("Генерирую…")
 
     scene = await describe_scene_with_openai(interior)
-    img_bytes = await nanobanana_generate(interior, door_png, color, scene, seed=42)
+    img_bytes = await gemini_generate(interior, door_png, color, scene, aspect="2:3")
 
     await m.answer_photo(photo=img_bytes, caption=f"{door['name']} — цвет: {color}")
     await state.clear()
