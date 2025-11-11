@@ -139,14 +139,13 @@ Return JSON only.
 async def gemini_generate(
     base_image: Path, door_png: Path, color: str, scene: Dict[str, Any], aspect: str = "2:3"
 ) -> bytes:
-    """
-    Генерация (редактирование/компоновка) изображения через Google Gemini.
-    Передаём: текстовый промпт + фото интерьера + PNG двери.
-    Возвращаем: bytes готовой картинки (PNG).
-    """
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    from google import genai
+    from google.genai import types
+    from PIL import Image
+    import io, os
 
-    # Составляем промпт из анализа сцены + требований к двери
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
     style_keywords = ", ".join(scene.get("style_keywords", []))
     walls_hex = scene.get("surfaces", {}).get("walls", {}).get("color_hex", "beige")
     floor = scene.get("surfaces", {}).get("floor", {})
@@ -160,49 +159,47 @@ async def gemini_generate(
         "into the provided INTERIOR IMAGE with high realism.\n\n"
         "HARD REQUIREMENTS:\n"
         "- Place the door on the end wall as the main, unobstructed subject (frontal, one-point perspective, eye level, ~35mm look).\n"
-        f"- Recolor only the door leaf to {color}; preserve original panels, glazing, material grain, and hardware.\n"
-        "- Keep verticals straight, scale realistic (~2.0–2.1 m door height). No occlusion by decor. Do not add extra doors.\n"
-        "- Maintain scene style, lighting, and palette exactly as the interior photo.\n\n"
-        "SCENE HINTS FROM ANALYSIS:\n"
+        f"- Recolor only the door leaf to {color}; preserve panels, glazing, material grain, and hardware.\n"
+        "- Keep verticals straight, realistic scale (~2.0–2.1 m door height). Do not add extra doors. No occlusion by decor.\n"
+        "- Maintain the interior style, lighting, and palette exactly as in the base image.\n\n"
+        "SCENE DETAILS (from analysis):\n"
         f"- Style: {style_keywords}\n"
-        f"- Walls: {walls_hex} matte with white casings/moldings.\n"
+        f"- Walls: {walls_hex} matte with white moldings.\n"
         f"- Floor: {floor_material} {floor_pattern} matte.\n"
-        f"- Metals: brushed brass, matte black.\n"
-        f"- Lighting: {lighting} + warm wall sconce glow when present.\n"
+        "- Metals: brushed brass, matte black.\n"
+        f"- Lighting: {lighting} + warm sconce glow if present.\n"
         f"- Palette: {palette}\n\n"
         "QUALITY:\n"
-        "Ultra-realistic PBR materials, natural GI, accurate contact shadows, no halos, no plastic shine.\n"
-        "Negative: glare, over-sharpening, extra clutter, people, text, logos.\n"
+        "Ultra-realistic PBR materials, soft daylight, accurate contact shadows, filmic tone mapping. "
+        "Negative: glare, over-sharpening, plastic sheen, extra clutter, people, text, logos."
     )
 
-    # Загружаем изображения (Gemini принимает PIL Image)
-    interior_img = Image.open(base_image)
-    door_img = Image.open(door_png)
+    # Загружаем входные изображения
+    interior_img = Image.open(base_image).convert("RGB")
+    door_img = Image.open(door_png).convert("RGBA")  # PNG с альфой
 
-    # Просим вернуть только КАРТИНКУ (без текста), и ставим формат кадра
+    # Конфиг нового SDK: response_modalities в ВЕРХНЕМ регистре, ImageConfig для aspect_ratio
     cfg = types.GenerateContentConfig(
-        response_modalities=["Image"],
-        image_config=types.ImageConfig(aspect_ratio=aspect)  # варианты: "2:3", "3:2", "16:9", ...
+        response_modalities=["IMAGE"],
+        image_config=types.ImageConfig(aspect_ratio=aspect),
     )
 
-    # Важно: порядок. Сначала текст, затем оба изображения.
     resp = client.models.generate_content(
         model="gemini-2.5-flash-image",
         contents=[prompt, interior_img, door_img],
         config=cfg,
     )
 
-    # Ответ может содержать несколько частей; ищем картинку
+    # Ищем картинку в ответе
     for part in resp.parts:
-        if part.inline_data is not None:
+        if getattr(part, "inline_data", None):
             out_img = part.as_image()  # PIL.Image
             buf = io.BytesIO()
             out_img.save(buf, format="PNG")
             return buf.getvalue()
 
-    # Если не пришло изображение
-    raise RuntimeError("Gemini did not return an image. Try another prompt or check API quota.")
-
+    raise RuntimeError("Gemini did not return an image. Try another prompt or check quota.")
+  
 
 async def nanobanana_generate(base_image: Path, door_png: Path, color: str,
                               scene: Dict[str,Any], seed: Optional[int] = None) -> bytes:
