@@ -15,6 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from PIL import Image
+from aiogram.types import BufferedInputFile
 
 # ------------ env ------------
 load_dotenv()
@@ -330,7 +331,8 @@ async def generate_and_send(m: Message, state: FSMContext):
 
     scene = await describe_scene_with_openai(interior)
     img_bytes = await gemini_generate(interior, door_png, color, scene, aspect="2:3")
-
+  
+    file = BufferedInputFile(img_bytes, filename="result.png")  # имя нужно для Telegram
     await m.answer_photo(photo=img_bytes, caption=f"{door['name']} — цвет: {color}")
     await state.clear()
     await m.answer("Готово! Пришли новое фото, чтобы попробовать ещё.")
