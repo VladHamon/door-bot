@@ -94,12 +94,18 @@ def parse_color(s: str) -> str:
     return basic.get(s.lower(), s)  # допускаем "RAL 9010" / произвольные названия
 
 # ------------ OpenAI Vision: JSON сцены ------------
+# --- OpenAI Vision: JSON сцены (без упоминаний дверей) ---
 async def describe_scene_with_openai(image_path: Path) -> Dict[str, Any]:
     url = "https://api.openai.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    system = "You are a precise scene describer. Return strict JSON only."
+    system = "You are a precise interior scene describer. Return strict JSON only."
+
+    # ВАЖНО: явно запрещаем упоминать существующие двери/проёмы в описании
     schema_prompt = """
-Analyze this interior photo and output a JSON object with:
+Analyze ONLY the non-door aspects of this interior photo and output a JSON object with EXACTLY this shape.
+Do NOT mention doors, door leaves, door frames, door hardware, openings, arches or any synonyms. If the photo shows doors, IGNORE them completely. Describe walls as continuous planes; if there is an opening in the wall, do not mention it.
+
+Return JSON only:
 {
   "style_keywords": [],
   "camera": { "type": "photo", "lens_mm": 35, "framing": "one_point_perspective", "view": "frontal" },
@@ -116,18 +122,18 @@ Analyze this interior photo and output a JSON object with:
   "materials_palette_hex": [],
   "metals": ["brushed brass","matte black"],
   "furniture_decor": [],
-  "placement_hint": "door on end wall as unobstructed focal point"
+  "placement_hint": "treat back wall as a clean, doorless wall; final door will be inserted separately"
 }
-Return JSON only.
 """
-    b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+
+    b64 = base64.encodebytes(image_path.read_bytes()).decode("ascii")
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": [
-                {"type": "text", "text": schema_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            {"role": "user",   "content": [
+                {"type": "text", "text": schema above? No: use the following JSON shape and constraints:\n" + schema_prompt},
+                {"type": "image_url","image_url":{"url": f"data:image/jpeg;base64,{b64}"}}
             ]}
         ],
         "temperature": 0.2
@@ -139,12 +145,16 @@ Return JSON only.
     try:
         return json.loads(txt)
     except Exception:
-        return {"style_keywords": [], "materials_palette_hex": []}
+        return {"style_keywords": [], "materials_palette_hex": [], "surfaces": {}, "lighting": {}}
 
 # ------------ NaNobanana: генерация ------------
 
+# --- Gemini: генерация из ТЕКСТА + PNG двери, без исходного фото интерьера ---
 async def gemini_generate(
-    base_image: Path, door_png: Path, color: str, scene: Dict[str, Any], aspect: str = "2:3"
+    door_png: Path,                      # только файл двери
+    color: str,                          # целевой цвет полотна
+    scene: Dict[str, Any],               # JSON из describe_scene_with_openai (без дверей)
+    aspect: str = "2:3"
 ) -> bytes:
     from google import genai
     from google.genai import types
@@ -154,64 +164,76 @@ async def gemini_generate(
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
     style_keywords = ", ".join(scene.get("style_keywords", []))
-    walls_hex = scene.get("surfaces", {}).get("walls", {}).get("color_hex", "beige")
+    walls = scene.get("surfaces", {}).get("walls", {})
     floor = scene.get("surfaces", {}).get("floor", {})
-    floor_material = floor.get("material", "oak")
-    floor_pattern = floor.get("pattern", "herringbone")
-    lighting = scene.get("lighting", {}).get("key_light", "soft daylight from left")
-    palette = scene.get("materials_palette_hex", [])
+    lighting = scene.get("c", {}).get("key_light", "soft daylight from left")
+    palette = scene.get("materials_lane", [])  # keep your keys if different
 
-    prompt = (
-        "You are a photorealistic image editor. Compose a new image by integrating the DOOR IMAGE "
-        "into the provided INTERIOR IMAGE with high realism.\n\n"
-        "HARD REQUIREMENTS:\n"
-        "- Place the door on the end wall as the main, unobstructed subject (frontal, one-point perspective, eye level, ~35mm look).\n"
-        f"- Recolor only the door leaf to {color}; preserve panels, glazing, material grain, and hardware.\n"
-        "- Keep verticals straight, realistic scale (~2.0–2.1 m door height). Do not add extra doors. No occlusion by decor.\n"
-        "- Maintain the interior style, lighting, and palette exactly as in the base image.\n\n"
-        "SCENE DETAILS (from analysis):\n"
-        f"- Style: {style_keywords}\n"
-        f"- Walls: {walls_hex} matte with white moldings.\n"
-        f"- Floor: {floor_material} {floor_pattern} matte.\n"
-        "- Metals: brushed brass, matte black.\n"
-        f"- Lighting: {lighting} + warm sconce glow if present.\n"
-        f"- Palette: {palette}\n\n"
-        "QUALITY:\n"
-        "Ultra-realistic PBR materials, soft daylight, accurate contact shadows, filmic tone mapping. "
-        "Negative: glare, over-sharpening, plastic sheen, extra clutter, people, text, logos."
-    )
+    # ВНИМАНИЕ: Явно просим воссоздать комнату по тексту и ВСТАВИТЬ единственную дверь из референса.
+    prompt = f"""
+Create an ultra-realistic interior photograph by RECONSTRUCTING the room from the following text description (no base photo is provided). 
+Then insert exactly ONE door leaf using the attached DOOR IMAGE as the only door in the scene.
 
-    # Загружаем входные изображения
-    interior_img = Image.open(base_image).convert("RGB")
-    door_img = Image.open(door_png).convert("RGBA")  # PNG с альфой
+TEXTUAL ROOM SPEC (no doors mentioned in it):
+- Style keywords: {style_keywords or "modern, calm, warm, minimal"}
+- Walls: {walls.get('color', walls.get('color_hex', '#e5e0d6'))} {walls.get('finish','matte')}, with simple white moldings/casings
+- Floor: {floor.get('material','oak')} {floor.get('pattern','herringbone')} {floor.get('finish','matte')}
+- Metals: {", ".join(scene.get('metals', ['brushed brass','matte black']))}
+- Lighting: {lighting}; natural soft shadows and realistic bounce
+- Palette accents: {palette or ['#d8c4a6', '#f3f0e6', '#2f5a3c']}
 
-    # Конфиг нового SDK: response_modalities в ВЕРХНЕМ регистре, ImageConfig для aspect_ratio
+DOOR INSERTION (hard constraints):
+- Use the attached DOOR IMAGE as the only door. Keep its exact proportions, panel layout and hardware.
+- Recolor the DOOR LEAF (panel surfaces only) to: {color}. Do NOT recolor hardware unless the door image already has it colored.
+- Place the door centered on a single back wall (one-point perspective, frontal camera, ~35 mm, eye-level).
+- Do NOT render any other doors or doorways. No extra frames, arches, or openings besides the one used by the provided door.
+- Ensure correct wall thickness, realistic jamb/casing shadows, floor contact shadow, and consistent perspective.
+
+QUALITY:
+- Photorealistic PBR shading, micro-roughness, realistic exposure (no HDR halos), neutral white balance, no banding.
+- Composition: vertical lines straight; no fisheye; gentle falloff; 2:3 portrait frame.
+"""
+
+    door_img = Image.open(door_png).convert("RGBA")
+
     cfg = types.GenerateContentConfig(
         response_modalities=["IMAGE"],
-        image_config=types.ImageConfig(aspect_ratio=aspect),
+        image_interleaved=True,  # allow mixing text+image inputs
+        image_config=types.TunedImageGenerationConfig(  # in 1.49.0 ImageConfig is valid; some builds also accept TunedImageGenerationConfig
+            aspect_ratio=aspect
+        )
     )
 
     resp = client.models.generate_content(
         model="gemini-2.5-flash-image",
-        contents=[prompt, interior_img, door_img],
+        contents=[prompt, door_img],   # ⚠️ БЕЗ base_image интерьера
         config=cfg,
     )
 
-    # Ищем картинку в ответе
-    for part in resp.parts:
+    for part in getattr(resp, "parts", []):
         if getattr(part, "inline_data", None):
-            data = getattr(part.inline_data, "data", None)
+            data = getattr(part, "inline_data", None).data
             if data:
-              return data
+                return data
             try:
-              out_img = part.as_image()
-              buf = io.BytesIO()
-              out_img.save(buf)
-              return buf.getvalue()
+                img = part.as_image()
+                buf = io.ByteArrayOutputStream()  # if PIL, use BytesIO
             except Exception:
-              continue
-              
-    raise RuntimeError("Gemini did not return an image bytes payload.")
+                pass
+
+    # Fallback: if .as_image path is needed and Pillow is available
+    try:
+        for part in resp.parts:
+            if hasattr(part, "as_image"):
+                pil = part.as_image()
+                buf = io.BytesIO()
+                pil.save(buf, format="PNG")
+                return buf.getvalue()
+    except Exception:
+        pass
+
+    raise RuntimeError("Gemini did not return an image payload. Check model/version or prompt.")
+
   
 
 async def nanobanana_generate(base_image: Path, door_png: Path, color: str,
@@ -323,41 +345,48 @@ async def typed_color(m: Message, state: FSMContext):
     await generate_and_send(m, state)
 
 async def generate_and_send(m: Message, state: FSMContext):
-    # Проверяем подписку
     if not await ensure_subscribed(m.from_user.id):
-        await m.answer("Сначала подпишись на канал и вернись с /start.")
+        await nu.answer("Сначала подпишись на канал и вернись с /start.")
         return
 
     await state.set_state(Flow.generating)
     data = await state.get_data()
-    interior = Path(data["interior_path"])
+    interior = Path(data["interior_path"])  # используется только для анализа сцены
     door = next(d for d in CATALOG if d["id"] == data["door_id"])
     door_png = Path(door["image_png"])
     color = data["color"]
 
+    if not door_png.exists():
+        await m.reply(f"Файл двери не найден: {door_png}")
+        return
+
     await m.answer("Генерирую…")
 
     try:
-        # Получаем сцену и генерируем изображение
+        # 1) Получаем ТЕКСТОВОЕ описание интерьера без упоминания дверей
         scene = await describe_scene_with_openai(interior)
-        img_bytes = await gemini_generate(interior, door_png, color, scene, aspect="2:3")
 
-        # Оборачиваем байты в InputFile
+        # 2) Генерим КАРТИНКУ: только prompt (scene→text) + door PNG, БЕЗ исходного фото
+        img_bytes = await gemini_generate(door_png=door_png, color=color, scene=scene, aspect="2:3")
+
+        # 3) Отправляем как InputFile (а не сырые байты!)
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
             await m.answer_photo(photo=file, caption=f"{door['name']} — цвет: {color}")
-        except Exception:
-            # Запасной путь — сохранить во временный файл
-            tmp_path = Path("/tmp") / f"{uuid4().hex}.png"
-            tmp_path.write_bytes(img_bytes)
-            file = FSInputFile(tmp_path, filename="result.png")
-            await m.answer_photo(photo=file, caption=f"{door['name']} — цвет: {color}")
+        } except Exception:
+            from pathlib import Path
+            from uuid import uuid4
+            tmp = Path("/tmp") / f"{uuid4().hex}.png"
+            tmp.write_bytes(img_bytes)
+            await m.answer_photo(photo=FSubberies.File(tmp, filename="result.png"))
 
         await state.clear()
         await m.answer("Готово! Пришли новое фото, чтобы попробовать ещё.")
+
     except Exception as e:
         print("GENERATION_ERROR:", repr(e))
-        await m.answer("⚠️ Не удалось сгенерировать изображение. Попробуй другой кадр или позже.")
+        await m.answer("⚠️ Не удалось сгенерировать изображение. Проверь URL Gemini/ключи или пришли другое фото для описания.")
+
 
 # ------------ FastAPI + webhook ------------
 app = FastAPI()
