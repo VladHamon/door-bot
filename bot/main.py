@@ -295,22 +295,31 @@ def build_generation_prompt(interior_en: str, door_color_text: str) -> str:
 
     return f"""
 Create an ULTRA-REALISTIC interior photograph by RECONSTRUCTING the room from the following text ONLY (no base photo is provided).
-Then INSERT exactly ONE door leaf using the attached DOOR IMAGE. This door must be FULLY VISIBLE and UNOBSTRUCTED: do not block or 
-partially hide view of it with any objects. Do not create or mention any other doors/doorways.
+Then INSERT exactly ONE door leaf using the attached DOOR IMAGE.
 
-DOOR (hard constraints):
-- Use the attached DOOR IMAGE as the ONLY door. Keep its exact geometry (panel layout), proportions and hardware.
-- Recolor the DOOR LEAF and DOOR FRAMES (panel surfaces only) to: {door_color_line}. Do NOT recolor metal hardware.
-- Place the door centered on the BACK WALL (one-point alignment relative to that wall), camera eye-level ~35–40 mm equivalence.
-- The door must be FULLY VISIBLE and UNOBSTRUCTED: do not block or partially hide it with any furniture, decor, plants, textiles, or other objects.
-- Do NOT render any other doors/arches/openings. Ensure proper wall thickness and realistic contact shadows at the threshold and trim.
+CRITICAL CONSTRAINTS (must be followed precisely):
+- The inserted DOOR is the SINGLE, PRIMARY, and CENTRAL visual subject of the image.
+- The DOOR must be placed on the BACK WALL, centered in the composition (one-point perspective).
+- The DOOR must be seen FULLY and DIRECTLY from the front (no partial view, no angle cuts).
+- NOTHING may be in front of, across, or partially overlapping the door — not even slightly.
+- The door must be COMPLETELY VISIBLE from top to bottom and from edge to edge of the frame.
+- If any object (furniture, plant, decor, curtain, light fixture, etc.) partially blocks or touches the door,
+  the generation is considered INCORRECT.
+- The area in front of the door must remain EMPTY and CLEAR, ensuring 100% unobstructed visibility.
 
 ROOM (derived from the user's photo; ignore any doors in that photo):
 {interior_block}
 
+DOOR (hard constraints):
+- Use the attached DOOR IMAGE as the ONLY door. Keep its exact geometry (panel layout), proportions, and hardware.
+- Recolor the DOOR LEAF and DOOR FRAMES (panel surfaces only) to: {door_color_line}. Do NOT recolor metal hardware.
+- The door occupies the exact center of the image, on the back wall, viewed frontally.
+- No other doors, arches, or openings exist anywhere in the scene.
+
 QUALITY:
 - Photorealistic PBR shading; correct perspective; clean global illumination; accurate color management; minimal noise.
-- No HDR halos, no over-sharpening, no extra text/people/clutter.
+- Balanced exposure, no HDR halos, no over-sharpening, no text or people.
+
 """.strip()
 
 async def gemini_generate(door_png: Path, color_text: str, interior_en: str, aspect: str = "3:4") -> bytes:
