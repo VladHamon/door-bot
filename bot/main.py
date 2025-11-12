@@ -125,7 +125,7 @@ async def describe_scene_with_openai(image_path: Path) -> Dict[str, Any]:
     )
     b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
     payload = {
-        "model": "gpt-4o-mini",
+        "model": "gpt-5",
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": [
