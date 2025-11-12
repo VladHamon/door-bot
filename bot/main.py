@@ -295,7 +295,8 @@ def build_generation_prompt(interior_en: str, door_color_text: str) -> str:
 
     return f"""
 Create an ULTRA-REALISTIC interior photograph by RECONSTRUCTING the room from the following text ONLY (no base photo is provided).
-Then INSERT exactly ONE door leaf using the attached DOOR IMAGE. Do not create or mention any other doors/doorways.
+Then INSERT exactly ONE door leaf using the attached DOOR IMAGE. This door must be FULLY VISIBLE and UNOBSTRUCTED: do not block or 
+partially hide view of it with any objects. Do not create or mention any other doors/doorways.
 
 DOOR (hard constraints):
 - Use the attached DOOR IMAGE as the ONLY door. Keep its exact geometry (panel layout), proportions and hardware.
