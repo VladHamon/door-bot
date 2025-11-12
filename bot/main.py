@@ -233,8 +233,10 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     schema_prompt = textwrap.dedent("""
-        Describe this interior as thoroughly as possible. Capture absolutely everything — every single detail —
-        including all colors and the full color palette, interior objects with their shapes, sizes, and types,
+        Describe this interior as thoroughly as possible. Style and type. Capture absolutely everything — every single detail —
+        including all colors and the full color palette (Accuracy in the rendering of color and materials is very 
+        important; the color must be described in such a way that any artist can easily draw identical materials based 
+        on the description), interior objects with their shapes, sizes, and types,
         the lighting, the floor (type, texture, material, and color), the walls (material and color),
         the ceiling, and so on down to the smallest element.
 
