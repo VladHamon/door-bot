@@ -1,10 +1,8 @@
 from google import genai
 from google.genai import types
-import os, json, re, io, asyncio, uuid, base64
+import os, json, io, uuid
 from pathlib import Path
-from typing import Dict, Any, Optional
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, Router
@@ -22,50 +20,38 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from PIL import Image
 
+# -------------------- ENV --------------------
 load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENAI_API_KEY = os.environ["ID"] if "ID" in os.environ else os.environ["OPENAI_API_KEY"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 REQUIRED_BUILDER2112 = os.getenv("REQUIRED_CHANNEL", "@yourdoorshop")
-NANOBANANA_API_KEY = os.environ.get("NANOBANANA_API_KEY", "")
 
+# -------------------- TELEGRAM CORE --------------------
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
+# Каталог дверей: [{"id": "...", "name": "...", "image_png": "...", ...}, ...]
 CATALOG = json.loads(Path("catalog.json").read_text(encoding="utf-8"))
 
+# -------------------- FSM --------------------
 class Flow(StatesGroup):
-    waiting_foto = State()
     selecting_door = State()
-    selecting_color = State()
     generating = State()
 
+# -------------------- UTILS --------------------
 async def ensure_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(REQUIRED_BUILDER2112, user_id)
-        status = getattr(member, "status", None)
-        return status in ("member", "creator", "administrator")
+        return getattr(member, "status", None) in ("member", "creator", "administrator")
     except Exception:
         return False
 
-async def tg_download_photo(message: Message, dest: Path) -> Path:
-    photo = max(message.photo, key=lambda p: getattr(p, "file_size", 0))
-    f = await bot.get_file(photo.file_id)
-    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}"
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        data = r.content
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
-    return dest
-
 def build_doors_keyboard(page: int = 0, per_page: int = 6) -> InlineKeyboardMarkup:
     start = page * per_page
-    chunk = CATALOG[start:start + per_page]
+    chunk = CATALOG[start : start + per_page]
     rows = [[InlineKeyboardButton(text=d["name"], callback_data=f"door:{d['id']}")] for d in chunk]
     nav = []
     if start > 0:
@@ -76,146 +62,113 @@ def build_doors_keyboard(page: int = 0, per_page: int = 6) -> InlineKeyboardMark
         rows.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def parse_color(s: str) -> str:
-    s = (s or "").strip()
-    if re.match(r"^#([0-9A-Fa-f]{6})$", s):
-        return s
-    basic = {
-        "white": "#FFFFFF", "black": "#000000", "beige": "#E6D8C3", "cream": "#F3F0E6",
-        "gray": "#BFBFBF", "light gray": "#D9D9D9", "dark gray": "#6B6B6B",
-        "oak": "#D8C4A6", "walnut": "#8B6A4E", "green": "#2F5A3C", "brown": "#6B4E2E"
-    }
-    return basic.get(s.lower(), s)
+# -------------------- PROMPT --------------------
+def build_gemini_prompt() -> str:
+    """
+    Жёстко зафиксированный промпт под gemini-2.5-flash-image,
+    соответствует вашему ТЗ + запрет перекрывать дверь.
+    """
+    return """Create an ultra-realistic interior photograph in Mid-Century Modern style.
+Reconstruct the entire room ONLY from this text (no base photo is provided).
 
-def _json_sanitise(obj):
-    if isinstance(obj, dict):
-        return {k: _json_sanitise(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_n for _n in map(_json_sanitise, obj)]
-    return obj
+Then INSERT exactly ONE door leaf using the ATTACHED DOOR IMAGE:
+— The attached door is the ONLY door allowed in the scene.
+— Preserve its exact geometry, proportions, and hardware.
+— Recolor the DOOR LEAF panels ONLY to pure white (#FFFFFF). Do NOT recolor or modify metal hardware.
+— Place the door centered on the BACK WALL, one-point placement for the door (camera eye level ~35–40 mm).
+— The door must be FULLY VISIBLE and UNOBSTRUCTED: do not block or partially hide it with any furniture, decor, plants, textiles, or other objects.
+— Do NOT create, hint, or show any other doors, openings, arches, or thresholds.
+— Ensure correct wall thickness at the opening and realistic contact shadows at the threshold/trim.
 
-async def describe_scene_with_openai(image_path: Path) -> Dict[str, Any]:
-    url = "https://api.openai.com/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-    system = "You are a precise interior scene describer. Return strict JSON only."
-    schema_prompt = (
-        "Analyze ONLY the non-door aspects of this interior photo and output a JSON object with EXACTLY this shape.\n"
-        "Do NOT mention doors, door leaves, door frames, door hardware, openings, arches or thresholds. "
-        "If the photo shows doors, IGNORE them completely. Describe walls as continuous planes; if there is an opening "
-        "in the wall, do not mention it.\n\n"
-        "Return JSON only:\n"
-        "{\n"
-        '  "style_keywords": [],\n'
-        '  "camera": { "type": "photo", "lens_mm": 35, "framing": "one_point_perspective", "view": "frontal" },\n'
-        '  "geo": { "room_type": "", "ceiling_height_m": 2.7, "vanishing_lines": "towards center" },\n'
-        '  "surfaces": {\n'
-        '    "walls": { "color_hex": "#D7C8B6", "finish": "matte", "molding": "crown/baseboards/casings: yes/no" },\n'
-        '    "floor": { "material": "oak", "pattern": "herringbone", "finish": "matte" }\n'
-        "  },\n"
-        '  "lighting": {\n'
-        '    "key_light": "daylight from left/right/front/back",\n'
-        '    "practicals": ["wall sconce brass glass", "ceiling drum light"],\n'
-        '    "mood": "soft, warm, airy"\n'
-        "  },\n"
-        '  "materials_palette_hex": [],\n'
-        '  "metals": ["brushed brass","matte black"],\n'
-        '  "furniture_decor": [],\n'
-        '  "placement_hint": "treat back wall as a clean, doorless wall; final door will be inserted later"\n'
-        "}"
-    )
-    b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    payload = {
-        "model": "gpt-5",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": [
-                {"type": "text", "text": schema_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-            ]}
-        ],
-        "temperature": 0.2,
-    }
-    async with hydra_client() as client:
-        r = await client.post(url, headers=headers, json=_json_sanitise(payload))
-        r.raise_for_status()
-        txt = r.json()["choices"][0]["message"]["content"].strip()
-    try:
-        data = json.loads(txt)
-    except Exception:
-        return {
-            "style_keywords": [],
-            "geo": {"room_type": "", "ceiling_height_m": 2.7, "vanishing_lines": "towards center"},
-            "surfaces": {},
-            "lighting": {},
-            "materials_palette_hex": [],
-            "metals": [],
-            "furniture_decor": [],
-            "placement_hint": "treat back wall as a clean, doorless wall; final door will be inserted later",
-        }
-    if "geometry" in data and "geo" not in data:
-        data["geo"] = data.pop("geometry")
-    data.setdefault("surfaces", {})
-    data.setdefault("lighting", {})
-    if "materials_palette_h\u200bex" in data and "materials_palette_hex" not in data:
-        data["materials_palette_hex"] = data.pop("materials_palette_h\u200bex")
-    data.setdefault("materials_palette_hex", [])
-    data.setdefault("metals", data.get("metals", []))
-    data.setdefault("style_keywords", data.get("style_keywords", []))
-    data.setdefault("geo", {"room_type": "", "ceiling_height_m": 2.7, "vanishing_lines": "towards center"})
-    return data
+ROOM DESCRIPTION (follow precisely):
+[CAMERA & FRAMING]
+• Perspective: two-point; slight angle from the left; vertical 3:4; ~40 mm lens; camera height ~150 cm.
+• Focus plane: on the nightstand and edge of the bed. Slight DOF; dresser and back wall remain sharp.
+• Framing: include dresser (left, foreground), nightstand (center-left), bed (right), and a clear centered view of the door on the back wall.
 
-def hydra_client():
-    return httpx.AsyncClient(timeout=300)
+[LIGHTING]
+• Soft, diffuse daylight from a large source on the left (out of frame).
+• Very soft, subtle shadows cast to the right.
+• Ambient fill: neutral; gentle bounce from white ceiling and bedding.
+• Color temperature: ~3500–4000 K (warm-neutral). Balanced exposure. No bloom, no HDR look, no stylization.
 
-async def gemini_generate(
-    door_png: Path,
-    color: str,
-    scene: Dict[str, Any],
-    aspect: str = "2:3",
-) -> bytes:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    style_words = ", ".join(scene.get("style_keywords", []))
-    walls = scene.get("surfaces", {}).get("walls", {}) or {}
-    floor = scene.get("surfaces", {}).get("floor", {}) or {}
-    lighting = (scene.get("lighting", {}) or {}).get("key_light", "soft daylight from left")
-    palette = scene.get("materials_palette_hex", [])
-    prompt = f"""
-Create an ultra-realistic interior photograph by RECONSTRUCTING the room from the following text only (no base photo is provided).
-Then INSERT exactly ONE door leaf using the attached DOOR IMAGE. Do not create or mention any other doors/doorways.
+[COLOR PALETTE]
+• Walls: muted olive green #69694A
+• Trim/Crown: off-white #F5F4F0
+• Ceiling: white #FFFFFF
+• Bedding: crisp white #FFFFFF
+• Wood: warm walnut #6B4933
+• Floor (oak): #8A6240
+• Metals: brushed brass/gold #B08D57
+• Throw: textured grey #6A6761
+• Cushion: dark tan #745A3D
+• Rug: cream #E3DACE, grey #9A9A9A, gold #AF8C5A
+• Greenery: muted green #5E6B4A
 
-ROOM (text spec; ignore any doors in the original photo):
-- Style keywords: {style_words or "modern, calm, minimal"}
-- Walls: {walls.get('color_hex', walls.get('color', '#e5e0e0'))} {walls.get('finish', 'matte')}, with simple white moldings/casings
-- Floor: {floor.get('material','oak')} {floor.get('pattern','herringbone')} {floor.get('finish','matte')}
-- Metals/accents: {", ".join(scene.get("metals", ["brushed brass","matte black"]))}
-- Lighting: {lighting}; natural bounce, gentle soft shadows
-- Palette accents: {", ".join(palette) if isinstance(palette, list) else ''}
+[ARCHITECTURE & ENVELOPE]
+• Walls: smooth eggshell paint (#69694A). Left wall is a continuous plane meeting the back wall at 90°.
+• Ceiling: flat white (#FFFFFF); simple stepped crown in #F5F4F0.
+• Baseboards/trim: none visible (except door trim as needed).
+• Floor: hardwood planks, medium-tone oak #8A6240, 3–4 inch width, satin finish.
+• No windows visible.
 
-DOOR (hard constraints):
-- Use the attached DOOR IMAGE as the ONLY door. Keep its exact geometry (panels), proportions and hardware.
-- Recolor the DOOR LEAF (panel surfaces only) to: {color}. Do NOT recolor metal hardware unless it is already colored in the source.
-- Place the door centered on the back wall (one-point perspective, eye-level, ~35 mm).
-- Do NOT render any other doors/arches/openings. Ensure proper wall thickness and contact shadows at threshold.
+[RUG]
+• Low-pile wool, rectangular; woven texture; bound edge.
+• Placement: under nightstand and partially under bed, perpendicular to bed.
 
-QUALITY:
-- Photorealistic PBR shading; correct perspective; no HDR halos; no over-sharpening; no extra text/people/clutter.
+[FURNITURE]
+• Dresser (left/foreground): ~140×45×75 cm; walnut veneer #6B4933 (satin); mid-century; tapered angled legs;
+  lower section: 3 large drawers w/ long horizontal wood pulls; top: 3 small drawers (2 left, 1 right) w/ small round inset pulls; pristine.
+• Nightstand (back wall, left of bed): ~55×40×60 cm; walnut veneer; one drawer w/ two small round inset pulls, open shelf; tapered legs; pristine.
+• Bed (back wall, right): queen (~160 cm wide); walnut platform, low rectangular headboard, tapered legs; pristine.
+
+[DECOR & OBJECTS]
+• Wall panel: one large vertical panel with arched/curved top, cream #EAE8DE, centered above the dresser.
+• Wall sconce: cone shade, olive #5A5A3C; mounted at center of the panel; OFF.
+• On dresser (left→right): 1 large light-grey vase #B8B4AA with 3–4 leafy stems #5E6B4A; 1 small clear glass bud vase;
+  1 stack of 2–3 books (one dark red spine); 1 small brass sphere #B08D57 (≈6–8 cm).
+• On nightstand (left→right): 1 small black vase #3A3A3A; 1 medium matte light-grey vase #C4C4C4 with 2 leafy stems; 1 small stack of 2 white books.
+
+[TEXTILES]
+• Duvet & sheets: crisp white cotton; folded down; soft, realistic folds.
+• Sleep pillows: 2 white.
+• Decorative pillow: 1 rectangular, dark tan #745A3D (velvet/chenille).
+• Throw: chunky knit medium-grey #6A6761, draped over right corner of bed.
+
+[MATERIAL & SHADER NOTES]
+• PBR realism; correct micro-roughness and IOR.
+• Wood: satin sheen, clear grain (horizontal on drawer fronts, vertical on legs/frame).
+• Paint: eggshell low gloss.
+• Metal: brushed brass (low gloss).
+• Ceramics: matte/satin.
+• Fabric: visible weave/pile; natural drape.
+• Lighting: physically plausible global illumination. No HDR halos, no over-sharpening, no bloom.
+
+[SCALE]
+• Ceiling ~2.7 m; dresser ~140 cm W; nightstand ~55 cm W; headboard ~80–85 cm H.
+
+[NEGATIVE & CONSTRAINTS]
+• Absolutely NO other doors/arches/openings/thresholds.
+• Do not invent extra rooms or spaces.
+• No people or pets.
+• Keep wall continuity; treat left wall as solid plane.
+• The door must remain completely visible with NO occlusion by any item.
+
+[RENDER QUALITY]
+• Photorealistic output; crisp textures; minimal noise; accurate color management; natural contrast.
 """
-    img = Image.open(door_png).convert("RGBA")
-    cfg = types.GenerateContentConfig(
-        response_modalities=["Image"],
-        image_config=types.ImageConfig(aspect_ratio=aspect),
-    )
-    resp = client.models.generate_content(
-        model="gemini-2.5-flash-image",
-        contents=[prompt, img],
-        config=cfg,
-    )
+
+# -------------------- GEMINI --------------------
+def read_image_rgba(path: Path) -> Image.Image:
+    img = Image.open(path).convert("RGBA")
+    return img
+
+def as_image_bytes_from_response(resp) -> bytes:
+    # Универсальный «сборщик» из ответа Gemini
     if hasattr(resp, "parts"):
         for part in resp.parts:
-            if hasattr(part, "inline_data") and getattr(part, "inline_data", None):
-                data = part.inline_data.data
-                if data:
-                    return data
+            if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
+                return part.inline_data.data
             if hasattr(part, "as_image"):
                 try:
                     pil = part.as_image()
@@ -228,40 +181,27 @@ QUALITY:
         cand = resp.candidates[0]
         if hasattr(cand, "content") and getattr(cand.content, "parts", None):
             for p in cand.content.parts:
-                if getattr(p, "inline_data", None):
-                    data = p.inline_data.data
-                    if data:
-                        return data
+                if getattr(p, "inline_data", None) and getattr(p.inline_data, "data", None):
+                    return p.inline_data.data
     raise RuntimeError("Gemini did not return an image payload")
 
-async def nanobanana_generate(base_image: Path, door_png: Path, color: str,
-                              scene: Dict[str,Any], seed: Optional[int] = None) -> bytes:
-    url = "https://api.nanobanana.ai/v1/image-to-image"
-    headers = {"Authorization": f"Bearer {NANOBANANA_API_KEY}"}
-    prompt = f"""
-Ultra-realistic interior photograph. Use the attached DOOR IMAGE as the main subject, centered on the back wall.
-Recolor the door leaf to {color}, preserve panels/hardware/grain. One-point perspective, eye level.
-Style: {', '.join(scene.get('style_keywords', []))}. Palette: {scene.get('materials_palette_hex', [])}.
-Walls: {scene.get('surfaces',{}).get('walls',{}).get('color_hex','beige')} matte with white moldings.
-Floor: {scene.get('surfaces',{}).get('floor',{}).get('material','oak')} {scene.get('surfaces',{}).get('floor',{}).get('pattern','herringbone')} matte.
-Lighting: {scene.get('lighting',{}).get('key_light','soft daylight from left')}.
-No extra doors/arches; decor kept to the sides; accurate contact shadows.
-"""
-    files = {
-        "prompt": (None, prompt),
-        "mode": (None, "img2img"),
-        "strength": (None, "0.55"),
-        "guidance": (None, "3.5"),
-        "seed": (None, str(seed or 42)),
-        "base_image": ("interior.jpg", base_image.read_bytes(), "image/jpeg"),
-        "reference_image_1": ("door.png", door_png.read_bytes(), "image/png"),
-        "preserve_reference": (None, "door_exact"),
-    }
-    async with hydra_client() as client:
-        r = await client.post(url, files=files, headers=headers)
-        r.raise_for_status()
-        return r.content
+def gemini_generate(door_png: Path, aspect: str = "3:4") -> bytes:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = build_gemini_prompt()
+    door_img = read_image_rgba(door_png)
 
+    cfg = types.GenerateContentConfig(
+        response_modalities=["Image"],
+        image_config=types.ImageConfig(aspect_ratio=aspect),  # vertical 3:4
+    )
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-image",
+        contents=[prompt, door_img],
+        config=cfg,
+    )
+    return as_image_bytes_from_response(resp)
+
+# -------------------- BOT HANDLERS --------------------
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     ok = await ensure_subscribed(m.from_user.id)
@@ -273,10 +213,8 @@ async def start(m: Message, state: FSMContext):
         await m.answer("Чтобы пользоваться ботом, подпишись на наш канал и нажми «Проверить подписку».", reply_markup=kb)
         return
     await state.clear()
-    await m.answer("Пришли фото интерьера.")
-    await state.set_state(Flow.waiting_foto)
-
-version_decorator = None
+    await m.answer("Выбери модель двери для вставки в интерьер:", reply_markup=build_doors_keyboard(0))
+    await state.set_state(Flow.selecting_door)
 
 @router.callback_query(F.data == "check_sub")
 async def check_sub(cb: CallbackQuery, state: FSMContext):
@@ -284,20 +222,9 @@ async def check_sub(cb: CallbackQuery, state: FSMContext):
     if not ok:
         await cb.answer("Ты ещё не подписан(а).", show_alert=True)
         return
-    await cb.message.answer("Спасибо! Пришли фото интерьера.")
-    await state.set_state(Flow.waiting_foto)
-    await cb.answer()
-
-@router.message(Flow.waiting_foto, F.photo)
-async def got_photo(m: Message, state: FSMContext):
-    if not await ensure_subscribed(m.from_user.id):
-        return
-    workdir = Path("work") / str(m.from_user.id) / str(uuid.uuid4())
-    img_path = workdir / "interior.jpg"
-    await tg_download_photo(m, img_path)
-    await state.update_data(interior_path=str(img_path))
-    await m.answer("Фото получено. Выбери модель двери:", reply_markup=build_doors_keyboard(0))
+    await cb.message.answer("Спасибо! Теперь выбери модель двери:", reply_markup=build_doors_keyboard(0))
     await state.set_state(Flow.selecting_door)
+    await cb.answer()
 
 @router.callback_query(Flow.selecting_door, F.data.startswith("page:"))
 async def paginate(cb: CallbackQuery):
@@ -308,67 +235,39 @@ async def paginate(cb: CallbackQuery):
 @router.callback_query(Flow.selecting_door, F.data.startswith("door:"))
 async def chose_door(cb: CallbackQuery, state: FSMContext):
     door_id = cb.data.split(":")[1]
-    door = next(d for d in CATALOG if str(d["id"]) == str(door_id))
+    door = next((d for d in CATALOG if str(d["id"]) == str(door_id)), None)
+    if not door:
+        await cb.answer("Не удалось найти эту дверь.", show_alert=True)
+        return
+
     await state.update_data(door_id=door_id)
-    palette = door.get("default_colors", [])
-    kb_rows = [[InlineKeyboardButton(text=c, callback_data=f"color:{c}")] for c in (palette[:6] if isinstance(palette, list) else [])]
-    kb_rows.append([InlineKeyboardButton(text="Другой цвет…", callback_data="color:custom")])
-    await cb.message.answer(f"Модель: <b>{door['name']}</b>\nВыбери цвет или напиши свой (#HEX / RAL / слово).",
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await cb.message.answer(f"Модель выбрана: <b>{door['name']}</b>\nНачинаю генерацию…")
     await cb.answer()
-    await state.set_state(Flow.selecting_color)
-
-@router.callback_query(Flow.selecting_color, F.data.startswith("color:"))
-async def chose_color(cb: CallbackQuery, state: FSMContext):
-    val = cb.data.split(":")[1]
-    if val == "custom":
-        await cb.message.answer("Напиши цвет: #HEX (например #F3F0E6), или RAL 9010, или слово (white, beige…).")
-        await cb.answer()
-        return
-    await state.update_data(color=val)
-    await cb.answer()
-    await generate_and_send(cb.message, state)
-
-@router.message(Flow.selecting_color)
-async def typed_color(m: Message, state: FSMContext):
-    color = parse_color(m.text)
-    await state.update_data(color=color)
-    await generate_and_send(m, state)
-
-async def generate_and_send(m: Message, state: FSMContext):
-    if not await ensure_subscribed(m.from_user.id):
-        await m.answer("Сначала подпишись на канал и вернись с /start.")
-        return
     await state.set_state(Flow.generating)
-    data = await state.get_data()
-    interior = Path(data["interior_path"])
-    door_id = data.get("door_id")
-    door = next(d for d in CATALOG if str(d["id"]) == str(door_id))
-    door_png = Path(door["image_png"])
-    color = parse_color(data.get("color", ""))
 
-    if not door_png.exists():
-        await m.answer(f"Файл двери не найден: {door_png}")
-        await state.clear()
-        return
-
-    await m.answer("Генерирую…")
+    # --- GENERATE ---
     try:
-        scene = await describe_scene_with_openai(interior)
-        img_bytes = await gemini_generate(door_png=door_png, color=color, scene=scene, aspect="2:3")
+        door_png = Path(door["image_png"])
+        if not door_png.exists():
+            await cb.message.answer(f"Файл двери не найден: {door_png}")
+            await state.clear()
+            return
+
+        img_bytes = gemini_generate(door_png=door_png, aspect="3:4")
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
-            await m.answer_photo(photo=file, caption=f"{door['name']} — цвет: {color}")
+            await cb.message.answer_photo(photo=file, caption=f"{door['name']} — дверь по центру задней стены (белые панели)")
         except Exception:
             tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
             tmp.write_bytes(img_bytes)
-            await m.answer_photo(photo=FSInputFile(str(tmp)), caption=f"{door['name']} — цвет: {color}")
+            await cb.message.answer_photo(photo=FSInputFile(str(tmp)), caption=f"{door['name']} — дверь по центру задней стены (белые панели)")
     except Exception as e:
         print("GENERATION_ERROR:", repr(e))
-        await m.answer("⚠️ Не удалось сгенерировать изображение. Проверьте ключи и попробуйте ещё раз.")
+        await cb.message.answer("⚠️ Не удалось сгенерировать изображение. Проверьте ключ GEMINI_API_KEY и попробуйте ещё раз.")
     finally:
         await state.clear()
 
+# -------------------- FASTAPI --------------------
 app = FastAPI()
 
 @app.get("/")
