@@ -317,12 +317,13 @@ async def gemini_generate(door_png: Path, color_text: str, interior_en: str, asp
     prompt = build_generation_prompt(interior_en=interior_en, door_color_text=color_text)
     img = Image.open(door_png).convert("RGBA")
 
-     cfg = types.GenerateContentConfig(
+    cfg = types.GenerateContentConfig(
         response_modalities=["Image"],
         image_config=types.ImageConfig(aspect_ratio=aspect),
         temperature=0.4,
         top_p=0.5,
     )
+
     resp = client.models.generate_content(
         model="gemini-2.5-flash-image",
         contents=[prompt, img],
