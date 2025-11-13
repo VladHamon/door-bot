@@ -297,7 +297,7 @@ CRITICAL CONSTRAINTS (must be followed precisely):
   the generation is considered INCORRECT.
 - The area in front of the door must remain EMPTY and CLEAR, ensuring 100% unobstructed visibility.
 
-ROOM (derived from the user's photo; ignore any doors in that photo):
+ROOM:
 {interior_block}
 
 DOOR (hard constraints):
