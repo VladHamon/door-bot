@@ -236,12 +236,13 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
         Describe this interior as thoroughly as possible. Style and type. Capture absolutely everything — every single detail —
         including all colors and the full color palette (Accuracy in the rendering of color and materials is very 
         important; the color must be described in such a way that any artist can easily draw identical materials based 
-        on the description), interior objects with their shapes, sizes, and types,
+        on the description, The color code of the items and RAL colors must be mentioned), interior objects with their shapes, sizes, and types,
         the lighting, the floor (type, texture, material, and color), the walls (material and color),
-        the ceiling, and so on down to the smallest element.
+        the ceiling, and so on down to the smallest element. If the scene contains tiles, parquet, patterns on the wall, patterns on the floor, 
+        their exact size must be indicated
 
-        In the description, you must not mention doors, doorways, or anything related to them.
-        The description must not include the location of interior items, the shape of the room,
+        In the description, you MUST NOT mention doors, doorways, or anything related to them.
+        The description MUST NOT include the location of interior items, the shape of the room,
         or the location of anything in the interior at all.
         Write the description in English.
 
