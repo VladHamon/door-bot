@@ -236,7 +236,7 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
         Describe this interior as thoroughly as possible. Style and type. Capture absolutely everything — every single detail —
         including all colors and the full color palette (Accuracy in the rendering of color and materials is very 
         important; the color must be described in such a way that any artist can easily draw identical materials based 
-        on the description, The color code of the items and RAL colors must be mentioned), interior objects with their shapes, sizes, and types,
+        on the description), interior objects with their shapes, sizes, and types,
         the lighting, the floor (type, texture, material, and color), the walls (material and color),
         the ceiling, and so on down to the smallest element. If the scene contains tiles, parquet, patterns on the wall, patterns on the floor, 
         their exact size must be indicated.
@@ -249,7 +249,7 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
     img = Image.open(image_path).convert("RGB")
 
     resp = client.models.generate_content(
-        model="gemini-2.5-pro",
+        model="gemini-2.5-flash",
         contents=[schema_prompt, img],
         config=types.GenerateContentConfig(temperature=0.2),
     )
