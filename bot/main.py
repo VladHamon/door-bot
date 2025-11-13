@@ -239,24 +239,11 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
         on the description, The color code of the items and RAL colors must be mentioned), interior objects with their shapes, sizes, and types,
         the lighting, the floor (type, texture, material, and color), the walls (material and color),
         the ceiling, and so on down to the smallest element. If the scene contains tiles, parquet, patterns on the wall, patterns on the floor, 
-        their exact size must be indicated
-
+        their exact size must be indicated.
         In the description, you MUST NOT mention doors, doorways, or anything related to them.
         The description MUST NOT include the location of interior items, the shape of the room,
         or the location of anything in the interior at all.
         Write the description in English.
-
-        After the description, you need to write the recommended 3-4 colors for the doors of this interior in JSON format.
-        (First, the color name, the RAL code for this color (name according to RAL),
-        and a brief description (on Russian) of why this color is suitable.)
-        Use this exact JSON shape:
-        {
-          "recommended_door_colors": [
-            {"name": "Traffic White", "ral": "RAL 9016", "reason_ru": "Короткое объяснение на русском", "hex": "#F6F7F4"},
-            {"name": "Silk Grey", "ral": "RAL 7044", "reason_ru": "Короткое объяснение на русском"}
-          ]
-        }
-        No markdown fences. Start with the description in English, then the JSON object.
     """).strip()
 
     img = Image.open(image_path).convert("RGB")
