@@ -297,14 +297,14 @@ CRITICAL CONSTRAINTS (must be followed precisely):
   the generation is considered INCORRECT.
 - The area in front of the door must remain EMPTY and CLEAR, ensuring 100% unobstructed visibility.
 
-ROOM:
-{interior_block}
-
 DOOR (hard constraints):
 - Use the attached DOOR IMAGE as the ONLY door. Keep its exact geometry (panel layout), proportions, and hardware.
 - Recolor the DOOR LEAF and DOOR FRAMES (panel surfaces only) to: {door_color_line}. Do NOT recolor metal hardware.
 - The door occupies the exact center of the image, on the back wall, viewed frontally.
 - No other doors, arches, or openings exist anywhere in the scene.
+
+ROOM:
+{interior_block}
 
 QUALITY:
 - Photorealistic PBR shading; correct perspective; clean global illumination; accurate color management; minimal noise.
