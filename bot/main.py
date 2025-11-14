@@ -523,16 +523,25 @@ async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
     img_path = Path(door["image_png"])
     caption = door_caption(door, idx)
     kb = build_carousel_keyboard(idx)
-    # Если это callback — пробуем редактировать; иначе — отправляем новое фото
+    # Если это callback — редактируем сообщение, но НЕ вызываем cb.answer() здесь
     if isinstance(cb_or_msg, CallbackQuery):
         try:
             media = InputMediaPhoto(media=FSInputFile(str(img_path)), caption=caption, parse_mode="HTML")
             await cb_or_msg.message.edit_media(media=media, reply_markup=kb)
         except Exception:
-            await cb_or_msg.message.answer_photo(photo=FSInputFile(str(img_path)), caption=caption, parse_mode="HTML", reply_markup=kb)
-        await cb_or_msg.answer()
+            await cb_or_msg.message.answer_photo(
+                photo=FSInputFile(str(img_path)),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
     else:
-        await cb_or_msg.answer_photo(photo=FSInputFile(str(img_path)), caption=caption, parse_mode="HTML", reply_markup=kb)
+        await cb_or_msg.answer_photo(
+            photo=FSInputFile(str(img_path)),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
 
 # =========================== TELEGRAM BOT FLOW ===========================
 async def send_disclaimer(msg: Message, state: FSMContext):
@@ -721,6 +730,9 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         await cb.answer("Стиль не найден", show_alert=True)
         return
 
+    # ОТВЕЧАЕМ на callback СРАЗУ, пока ещё ничего тяжёлого не делали
+    await cb.answer()
+
     _, label_ru, style_prompt = style_entry
 
     await state.set_state(Flow.describing)
@@ -750,7 +762,7 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Теперь выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(cb, state, idx=0)
-    await cb.answer()
+    # ЗДЕСЬ больше НЕ нужно cb.answer()
 
 
 @router.message(Flow.waiting_foto, F.photo)
