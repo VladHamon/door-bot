@@ -24,6 +24,13 @@ from aiogram.fsm.context import FSMContext
 from PIL import Image
 import httpx
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+WATERMARK_PATH = BASE_DIR / "assets" / "watermark.png"
+WATERMARK_ALPHA = 0.35        # прозрачность (0.0–1.0)
+WATERMARK_WIDTH_RATIO = 0.25  # ширина водяного знака ~25% ширины картинки
+WATERMARK_MARGIN_RATIO = 0.03 # отступ от краёв ~3% ширины
+
 # =========================== ENV ===========================
 load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -457,6 +464,50 @@ async def gemini_generate(door_png: Path, color_text: str, interior_en: str, asp
     )
     return _resp_image_bytes(resp)
 
+def apply_watermark(image_bytes: bytes) -> bytes:
+    """
+    Накладывает водяной знак на изображение.
+    Если watermark-файл не найден или ошибка — возвращаем исходные байты.
+    """
+    try:
+        if not WATERMARK_PATH.exists():
+            return image_bytes
+
+        # исходное изображение из Gemini
+        base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+
+        # сам watermark
+        wm = Image.open(WATERMARK_PATH).convert("RGBA")
+
+        # масштабируем по ширине кадра
+        target_w = int(base.width * WATERMARK_WIDTH_RATIO)
+        if target_w <= 0:
+            return image_bytes
+
+        scale = target_w / wm.width
+        target_h = int(wm.height * scale)
+        wm = wm.resize((target_w, target_h), Image.LANCZOS)
+
+        # ослабляем непрозрачность
+        r, g, b, a = wm.split()
+        a = a.point(lambda p: int(p * WATERMARK_ALPHA))
+        wm = Image.merge("RGBA", (r, g, b, a))
+
+        # позиция — правый нижний угол с отступом
+        margin = int(base.width * WATERMARK_MARGIN_RATIO)
+        x = base.width - wm.width - margin
+        y = base.height - wm.height - margin
+
+        base.alpha_composite(wm, dest=(x, y))
+
+        out = io.BytesIO()
+        base.convert("RGB").save(out, format="PNG")
+        return out.getvalue()
+    except Exception as e:
+        print("WATERMARK_ERROR:", repr(e))
+        return image_bytes
+
+
 # =========================== UI BUILDERS ===========================
 def build_colors_keyboard_and_text(colors: List[Dict[str, str]]) -> Tuple[InlineKeyboardMarkup, str]:
     """
@@ -882,12 +933,14 @@ async def generate_and_send(m: Message, state: FSMContext):
     if not await ensure_subscribed(m.from_user.id):
         await m.answer("Сначала подпишитесь на канал и вернитесь с /start.")
         return
+
     await state.set_state(Flow.generating)
     data = await state.get_data()
 
     door_id = data.get("door_id")
     color_text = data.get("color_text", "")
     interior_en = data.get("interior_description_en", "")
+
     if not door_id or not color_text:
         await m.answer("Не выбраны дверь и/или цвет. Начните заново: /start")
         await state.clear()
@@ -908,26 +961,52 @@ async def generate_and_send(m: Message, state: FSMContext):
         return
 
     # Дисклеймер + индикатор
-    await m.answer("⏳ Пожалуйста, ожидайте: выполняется генерация вашего интерьера…\n\n<b>Важно!</b> Иногда изображения могут не соответствовать ожиданиям. "
-                   "Попробуйте выбрать другую модель двери или другой интерьер. Цвета на изображении носят ориентировочный характер.", parse_mode="HTML")
+    await m.answer(
+        "⏳ Пожалуйста, ожидайте: выполняется генерация вашего интерьера…\n\n"
+        "<b>Важно!</b> Иногда изображения могут не соответствовать ожиданиям. "
+        "Попробуйте выбрать другую модель двери или другой интерьер. "
+        "Цвета на изображении носят ориентировочный характер.",
+        parse_mode="HTML",
+    )
     typing_stop = asyncio.Event()
-    typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop))
+    typing_task = asyncio.create_task(
+        run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
+    )
 
     try:
-        img_bytes = await gemini_generate(door_png=door_png, color_text=color_text, interior_en=interior_en, aspect="3:4")
+        # 1) Генерация изображения Gemini
+        img_bytes = await gemini_generate(
+            door_png=door_png,
+            color_text=color_text,
+            interior_en=interior_en,
+            aspect="3:4",
+        )
+
+        # 2) Наложение водяного знака
+        img_bytes = apply_watermark(img_bytes)
+
+        # 3) Отправка пользователю уже "брендированного" изображения
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
             await m.answer_photo(
                 photo=file,
-                caption=f"{door['name']} — выбранный цвет: {color_text}\nДверь по центру задней стены, полностью видима (ничем не закрыта)."
+                caption=(
+                    f"{door['name']} — выбранный цвет: {color_text}\n"
+                    f"Дверь по центру задней стены, полностью видима (ничем не закрыта)."
+                ),
             )
         except Exception:
             tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
             tmp.write_bytes(img_bytes)
-            await m.answer_photo(photo=FSInputFile(str(tmp)), caption=f"{door['name']} — выбранный цвет: {color_text}")
+            await m.answer_photo(
+                photo=FSInputFile(str(tmp)),
+                caption=f"{door['name']} — выбранный цвет: {color_text}",
+            )
     except Exception as e:
         print("GENERATION_ERROR:", repr(e))
-        await m.answer("⚠️ Не удалось сгенерировать изображение. Проверьте ключи и попробуйте ещё раз.")
+        await m.answer(
+            "⚠️ Не удалось сгенерировать изображение. Проверьте ключи и попробуйте ещё раз."
+        )
     finally:
         typing_stop.set()
         try:
@@ -936,12 +1015,24 @@ async def generate_and_send(m: Message, state: FSMContext):
             pass
 
     # Предложение продолжить
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔁 Выбрать другую дверь для этого интерьера", callback_data="again:door")],
-        [InlineKeyboardButton(text="🆕 Начать заново с новым интерьером", callback_data="again:new")],
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔁 Выбрать другую дверь для этого интерьера",
+                    callback_data="again:door",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🆕 Начать заново с новым интерьером", callback_data="again:new"
+                )
+            ],
+        ]
+    )
     await m.answer("Что дальше?", reply_markup=kb)
     await state.set_state(Flow.after_result)
+
 
 @router.callback_query(Flow.after_result, F.data == "again:door")
 async def again_door(cb: CallbackQuery, state: FSMContext):
