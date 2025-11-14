@@ -761,7 +761,7 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
 
     await cb.message.answer("Теперь выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
-    await show_or_update_carousel(cb, state, idx=0)
+    await show_or_update_carousel(cb.message, state, idx=0)
     # ЗДЕСЬ больше НЕ нужно cb.answer()
 
 
