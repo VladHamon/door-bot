@@ -243,6 +243,8 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
         In the description, you MUST NOT mention doors, doorways, or anything related to them.
         The description MUST NOT include the location of interior items, the shape of the room,
         or the location of anything in the interior at all.
+        If the scene contains massive objects (tables, kitchen islands, sofas) that serve as the center of the room, then when describing them, you 
+        need to write that they are visible only at 30-40 percent of their volume, and do not write that they are the center of the room.
         Write the description in English.
     """).strip()
 
