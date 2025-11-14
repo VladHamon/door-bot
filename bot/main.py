@@ -38,9 +38,26 @@ dp.include_router(router)
 
 CATALOG = json.loads(Path("catalog.json").read_text(encoding="utf-8"))
 
+STYLE_OPTIONS: List[Tuple[str, str, str]] = [
+    ("scandi", "Скандинавский", "Scandinavian interior"),
+    ("japandi", "Japandi", "Japandi interior"),
+    ("minimal", "Современный минимализм", "Modern minimalist interior"),
+    ("modern_classic", "Современная классика", "Modern classic interior"),
+    ("loft", "Лофт / Индустриальный", "Industrial loft interior"),
+    ("contemporary", "Контемпорари", "Contemporary interior"),
+    ("midcentury", "Mid-century modern", "Mid-century modern interior"),
+    ("wabi_sabi", "Ваби-саби", "Wabi-sabi interior"),
+    ("farmhouse", "Фармхаус / Modern farmhouse", "Modern farmhouse interior"),
+    ("transitional", "Переходный (Transitional)", "Transitional interior"),
+]
+
 # =========================== FSM ===========================
 class Flow(StatesGroup):
+    waiting_disclaimer_ok = State()
+    choosing_mode = State()
     waiting_foto = State()
+    waiting_text_palette = State()
+    selecting_style = State()
     describing = State()
     selecting_door = State()
     selecting_color = State()
@@ -277,6 +294,112 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
 
     return english_description, recommended
 
+async def describe_scene_from_text_and_palette(
+    description_text: str,
+    palette_image_path: Optional[Path],
+) -> Tuple[str, List[Dict[str, str]]]:
+    """
+    Описание интерьера по тексту пользователя и картинке-палитре.
+    Возвращает:
+      - english_description
+      - recommended_colors (может быть пустым, если модель не вернёт JSON)
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    user_part = description_text.strip()
+    base_prompt = textwrap.dedent(f"""
+        You need to create a description of the interior {user_part} with the colors of this palette following the following interior design rules: 
+        Describe this interior as thoroughly as possible. Style and type. Capture absolutely everything — every single detail —
+        including all colors and the full color palette (Accuracy in the rendering of color and materials is very 
+        important; the color must be described in such a way that any artist can easily draw identical materials based 
+        on the description, hex range), interior objects with their shapes, sizes, and types,
+        the lighting, the floor (type, texture, material, and color description and hex range), the walls (material and color description and hex range),
+        the ceiling, and so on down to the smallest element. If the scene contains tiles, parquet, patterns on the wall, patterns on the floor, 
+        their exact size must be indicated.
+        In the description, you MUST NOT mention doors, doorways, or anything related to them.
+        The description MUST NOT include the location of interior items, the shape of the room,
+        or the location of anything in the interior at all.
+        If the scene contains massive objects (tables, kitchen islands, sofas, beds) that serve as the center of the room, then when describing them, you 
+        need to write that they are visible only at 20 or less percent of their volume, and do not write that they are the center of the room, don't 
+        write that he's big.
+        Write the description in English.
+    """).strip()
+
+    contents: List[Any] = [base_prompt]
+    if palette_image_path is not None and palette_image_path.exists():
+        img = Image.open(palette_image_path).convert("RGB")
+        contents.append(img)
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contents,
+        config=types.GenerateContentConfig(temperature=0.2),
+    )
+
+    txt = _resp_text(resp).strip()
+    j = extract_json_block(txt)
+    recommended = normalize_recommended_colors(j)
+
+    english_description = txt
+    if j:
+        try:
+            dumped = json.dumps(j, ensure_ascii=False)
+            cut_pos = english_description.rfind(dumped)
+            if cut_pos != -1:
+                english_description = english_description[:cut_pos].strip()
+        except Exception:
+            pass
+
+    return english_description, recommended
+
+
+async def describe_scene_from_style(style_prompt: str) -> Tuple[str, List[Dict[str, str]]]:
+    """
+    Описание интерьера только по выбранному стилю (без исходного фото).
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    base_prompt = textwrap.dedent(f"""
+        You need to create a description of the interior {style_prompt} following interior design rules: 
+        Describe this interior as thoroughly as possible. Style and type. Capture absolutely everything — every single detail —
+        including all colors and the full color palette (Accuracy in the rendering of color and materials is very 
+        important; the color must be described in such a way that any artist can easily draw identical materials based 
+        on the description, hex range), interior objects with their shapes, sizes, and types,
+        the lighting, the floor (type, texture, material, and color description and hex range), the walls (material and color description and hex range),
+        the ceiling, and so on down to the smallest element. If the scene contains tiles, parquet, patterns on the wall, patterns on the floor, 
+        their exact size must be indicated.
+        In the description, you MUST NOT mention doors, doorways, or anything related to them.
+        The description MUST NOT include the location of interior items, the shape of the room,
+        or the location of anything in the interior at all.
+        If the scene contains massive objects (tables, kitchen islands, sofas, beds) that serve as the center of the room, then when describing them, you 
+        need to write that they are visible only at 20 or less percent of their volume, and do not write that they are the center of the room, don't 
+        write that he's big.
+        Write the description in English.
+    """).strip()
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[base_prompt],
+        config=types.GenerateContentConfig(temperature=0.2),
+    )
+
+    txt = _resp_text(resp).strip()
+    j = extract_json_block(txt)
+    recommended = normalize_recommended_colors(j)
+
+    english_description = txt
+    if j:
+        try:
+            dumped = json.dumps(j, ensure_ascii=False)
+            cut_pos = english_description.rfind(dumped)
+            if cut_pos != -1:
+                english_description = english_description[:cut_pos].strip()
+        except Exception:
+            pass
+
+    return english_description, recommended
+
+
 # =========================== 2) ГЕНЕРАЦИЯ КАДРА (Gemini 2.5 Flash Image) ===========================
 def build_generation_prompt(interior_en: str, door_color_text: str) -> str:
     """
@@ -362,6 +485,19 @@ def build_colors_keyboard_and_text(colors: List[Dict[str, str]]) -> Tuple[Inline
     description_text = "\n".join(description_lines) if description_lines else "Выберите один из предложенных оттенков или введите свой цвет."
     return kb, description_text
 
+def build_styles_keyboard() -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for style_id, label, _ in STYLE_OPTIONS:
+        row.append(InlineKeyboardButton(text=label, callback_data=f"style:{style_id}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def current_catalog_index(state_data: Dict[str, Any]) -> int:
     return int(state_data.get("carousel_idx", 0))
 
@@ -399,6 +535,22 @@ async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
         await cb_or_msg.answer_photo(photo=FSInputFile(str(img_path)), caption=caption, parse_mode="HTML", reply_markup=kb)
 
 # =========================== TELEGRAM BOT FLOW ===========================
+async def send_disclaimer(msg: Message, state: FSMContext):
+    disclaimer_text = (
+        "⚠️ <b>Важный дисклеймер</b>\n\n"
+        "Этот бот помогает получить общее представление о том, как двери из нашего каталога могут смотреться в вашем интерьере. "
+        "Из-за особенностей генерации изображений реальные цвета, материалы и отдельные объекты интерьера могут отличаться от результата на картинке. "
+        "Это нормально и не является точной рабочей визуализацией для чертежей и подбора отделочных материалов."
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="OK", callback_data="disclaimer_ok")]
+        ]
+    )
+    await state.clear()
+    await state.set_state(Flow.waiting_disclaimer_ok)
+    await msg.answer(disclaimer_text, parse_mode="HTML", reply_markup=kb)
+
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     ok = await ensure_subscribed(m.from_user.id)
@@ -409,9 +561,8 @@ async def start(m: Message, state: FSMContext):
         ])
         await m.answer("Чтобы пользоваться ботом, подпишись на наш канал и нажми «Проверить подписку».", reply_markup=kb)
         return
-    await state.clear()
-    await m.answer("Пришлите <b>фотографию интерьера</b>. Мы подробно опишем сцену (без упоминаний дверей), затем выберете модель и цвет двери — и сгенерируем результат.", parse_mode="HTML")
-    await state.set_state(Flow.waiting_foto)
+
+    await send_disclaimer(m, state)
 
 @router.callback_query(F.data == "check_sub")
 async def check_sub(cb: CallbackQuery, state: FSMContext):
@@ -419,9 +570,188 @@ async def check_sub(cb: CallbackQuery, state: FSMContext):
     if not ok:
         await cb.answer("Ты ещё не подписан(а).", show_alert=True)
         return
-    await cb.message.answer("Спасибо! Пришлите фото интерьера.")
+
+    await send_disclaimer(cb.message, state)
+    await cb.answer("Подписка подтверждена!")
+
+@router.callback_query(Flow.waiting_disclaimer_ok, F.data == "disclaimer_ok")
+async def disclaimer_ok(cb: CallbackQuery, state: FSMContext):
+    mode_text = (
+        "Ваш интерьер может быть описан тремя способами:\n\n"
+        "1. <b>Отправить фото интерьера / проекта</b> — мы проанализируем изображение и опишем интерьер без упоминания дверей.\n"
+        "2. <b>Описать интерьер словами и приложить палитру</b> — вы пишете, что хотите видеть, и отправляете фото/скрин палитры цветов.\n"
+        "3. <b>Выбрать стиль из списка</b> — мы создадим интерьер по популярному стилю, а потом вы выберете дверь и цвет.\n\n"
+        "Выберите один из вариантов ниже:"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📷 Отправить фото интерьера/проекта", callback_data="mode:photo")],
+            [InlineKeyboardButton(text="📝 Текст + палитра", callback_data="mode:text_palette")],
+            [InlineKeyboardButton(text="🎨 Выбрать стиль", callback_data="mode:style")],
+        ]
+    )
+    await cb.message.answer(mode_text, parse_mode="HTML", reply_markup=kb)
+    await state.set_state(Flow.choosing_mode)
+    await cb.answer()
+
+
+@router.callback_query(Flow.choosing_mode, F.data == "mode:photo")
+async def mode_photo(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer(
+        "Пришлите <b>фотографию интерьера</b> или дизайн-проекта. "
+        "Мы опишем сцену и дальше предложим выбрать дверь.",
+        parse_mode="HTML",
+    )
     await state.set_state(Flow.waiting_foto)
     await cb.answer()
+
+
+@router.callback_query(Flow.choosing_mode, F.data == "mode:text_palette")
+async def mode_text_palette(cb: CallbackQuery, state: FSMContext):
+    text = (
+        "Опишите, пожалуйста, ваш интерьер словами и приложите <b>палитру</b> цветов:\n\n"
+        "• Можно отправить одно сообщение с картинкой палитры и описанием в подписи.\n"
+        "• Либо сначала текст, потом отдельным сообщением — скрин/фото палитры.\n\n"
+        "Как только у нас будет и текст, и палитра, мы создадим детальное описание интерьера на их основе."
+    )
+    await cb.message.answer(text, parse_mode="HTML")
+    await state.update_data(tp_description=None, tp_palette_path=None)
+    await state.set_state(Flow.waiting_text_palette)
+    await cb.answer()
+
+
+@router.callback_query(Flow.choosing_mode, F.data == "mode:style")
+async def mode_style(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer(
+        "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
+        "Дальше вы сможете выбрать дверь и цвет.",
+        reply_markup=build_styles_keyboard(),
+    )
+    await state.set_state(Flow.selecting_style)
+    await cb.answer()
+
+@router.message(Flow.waiting_text_palette)
+async def handle_text_palette(m: Message, state: FSMContext):
+    if not await ensure_subscribed(m.from_user.id):
+        return
+
+    data = await state.get_data()
+    desc = (data.get("tp_description") or "").strip()
+    palette_path = data.get("tp_palette_path")
+
+    updated = False
+
+    # Если прилетела картинка палитры
+    if m.photo:
+        workdir = Path("work") / str(m.from_user.id) / str(uuid.uuid4())
+        img_path = workdir / "palette.jpg"
+        await tg_download_photo(m, img_path)
+        palette_path = str(img_path)
+        updated = True
+        # Берём описание из подписи, если оно есть
+        if m.caption and m.caption.strip():
+            desc = m.caption.strip()
+
+    # Если прилетел только текст
+    if m.text and m.text.strip():
+        desc = m.text.strip()
+        updated = True
+
+    if not updated:
+        await m.answer("Пожалуйста, отправьте текстовое описание интерьера и/или фото палитры.")
+        return
+
+    await state.update_data(tp_description=desc, tp_palette_path=palette_path)
+
+    # Если у нас уже есть и описание, и палитра — запускаем генерацию описания
+    if desc and palette_path:
+        await run_text_palette_pipeline(m, state)
+    elif desc and not palette_path:
+        await m.answer("Отлично, описание получили. Теперь, пожалуйста, отправьте фото/скрин палитры.")
+    elif palette_path and not desc:
+        await m.answer("Палитру получили. Теперь, пожалуйста, отправьте текстовое описание интерьера.")
+
+async def run_text_palette_pipeline(m: Message, state: FSMContext):
+    data = await state.get_data()
+    desc = (data.get("tp_description") or "").strip()
+    palette_path_str = data.get("tp_palette_path")
+
+    if not desc or not palette_path_str:
+        await m.answer("Нужно и текстовое описание, и палитра, чтобы продолжить.")
+        return
+
+    palette_path = Path(palette_path_str)
+
+    await state.set_state(Flow.describing)
+    await m.answer("⏳ Пожалуйста, ожидайте: создаём интерьер по вашему описанию и палитре…")
+
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
+
+    try:
+        english_desc, recommended_colors = await describe_scene_from_text_and_palette(desc, palette_path)
+    finally:
+        typing_stop.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
+
+    if english_desc:
+        for chunk in textwrap.wrap(english_desc, 3500, replace_whitespace=False, drop_whitespace=False):
+            await m.answer(truncate(chunk), parse_mode=None)
+
+    await state.update_data(
+        interior_description_en=english_desc,
+        recommended_colors=recommended_colors,
+        interior_path=str(palette_path),
+        tp_description=None,
+        tp_palette_path=None,
+    )
+
+    await m.answer("Теперь выберите модель двери (листайте карусель):")
+    await state.set_state(Flow.selecting_door)
+    await show_or_update_carousel(m, state, idx=0)
+
+@router.callback_query(Flow.selecting_style, F.data.startswith("style:"))
+async def style_selected(cb: CallbackQuery, state: FSMContext):
+    style_id = cb.data.split(":", 1)[1]
+    style_entry = next((s for s in STYLE_OPTIONS if s[0] == style_id), None)
+    if not style_entry:
+        await cb.answer("Стиль не найден", show_alert=True)
+        return
+
+    _, label_ru, style_prompt = style_entry
+
+    await state.set_state(Flow.describing)
+    await cb.message.answer(f"⏳ Создаём интерьер в стиле «{label_ru}»…")
+
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(run_chat_action(cb.message.chat.id, ChatAction.TYPING, typing_stop))
+
+    try:
+        english_desc, recommended_colors = await describe_scene_from_style(style_prompt)
+    finally:
+        typing_stop.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
+
+    if english_desc:
+        for chunk in textwrap.wrap(english_desc, 3500, replace_whitespace=False, drop_whitespace=False):
+            await cb.message.answer(truncate(chunk), parse_mode=None)
+
+    await state.update_data(
+        interior_description_en=english_desc,
+        recommended_colors=recommended_colors,
+    )
+
+    await cb.message.answer("Теперь выберите модель двери (листайте карусель):")
+    await state.set_state(Flow.selecting_door)
+    await show_or_update_carousel(cb, state, idx=0)
+    await cb.answer()
+
 
 @router.message(Flow.waiting_foto, F.photo)
 async def got_photo(m: Message, state: FSMContext):
