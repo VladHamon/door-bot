@@ -26,6 +26,15 @@ import httpx
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Список пользователей, которым отправляем картинки БЕЗ водяного знака
+WATERMARK_WHITELIST_USERNAMES = {
+    "Vlodekteper", 
+}
+
+# Если хочешь по ID (они стабильнее, чем username):
+WATERMARK_WHITELIST_IDS = {}
+
+
 WATERMARK_PATH = BASE_DIR / "assets" / "watermark.png"
 WATERMARK_ALPHA = 0.35        # прозрачность (0.0–1.0)
 WATERMARK_WIDTH_RATIO = 0.25  # ширина водяного знака ~25% ширины картинки
@@ -503,6 +512,26 @@ def apply_watermark(image_bytes: bytes) -> bytes:
     except Exception as e:
         print("WATERMARK_ERROR:", repr(e))
         return image_bytes
+
+from aiogram.types import User
+
+def should_apply_watermark(message: Message) -> bool:
+    user = message.from_user  # type: User | None
+    if not user:
+        return True  # на всякий случай — по умолчанию ставим
+
+    # Проверка по username
+    if user.username and user.username.lower() in {
+        u.lower() for u in WATERMARK_WHITELIST_USERNAMES
+    }:
+        return False
+
+    # Проверка по user_id
+    if user.id in WATERMARK_WHITELIST_IDS:
+        return False
+
+    return True
+
 
 
 
@@ -1194,10 +1223,11 @@ async def generate_and_send(m: Message, state: FSMContext):
             aspect="3:4",
         )
 
-        # 2) Наложение водяного знака
-        img_bytes = apply_watermark(img_bytes)
+        # 2) Наложение водяного знака — ТОЛЬКО если пользователь не в whitelist
+        if should_apply_watermark(m):
+            img_bytes = apply_watermark(img_bytes)
 
-        # 3) Отправка пользователю уже "брендированного" изображения
+        # 3) Отправка пользователю изображения
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
             await m.answer_photo(
