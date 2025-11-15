@@ -511,6 +511,39 @@ BACK_INLINE_KB = InlineKeyboardMarkup(
     inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
 )
 
+async def send_step_message(
+    target,
+    state: FSMContext,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    parse_mode: Optional[str] = "HTML",
+):
+    """
+    Шаговое сообщение бота:
+    - удаляет предыдущее служебное сообщение (если было);
+    - отправляет новое и сохраняет его id в состоянии.
+    ВАЖНО: НЕ использовать для итоговой фотографии.
+    """
+    # target может быть Message или CallbackQuery
+    if isinstance(target, CallbackQuery):
+        base_msg = target.message
+    else:
+        base_msg = target
+
+    data = await state.get_data()
+    last_id = data.get("last_bot_message_id")
+
+    if last_id:
+        try:
+            await bot.delete_message(chat_id=base_msg.chat.id, message_id=last_id)
+        except Exception:
+            # Уже удалено / слишком старое — игнорируем
+            pass
+
+    sent = await base_msg.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    await state.update_data(last_bot_message_id=sent.message_id)
+    return sent
+
 
 def build_colors_keyboard_and_text(colors: List[Dict[str, str]]) -> Tuple[InlineKeyboardMarkup, str]:
     """
@@ -575,40 +608,67 @@ def door_caption(door: Dict[str, Any], idx: int) -> str:
 async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
     """
     Показываем/обновляем карусель с фото двери и кнопками.
+    При этом:
+    - удаляем предыдущее служебное сообщение шага (если было);
+    - запоминаем id сообщения с каруселью.
     """
-    idx = max(0, min(idx, len(CATALOG)-1))
+    idx = max(0, min(idx, len(CATALOG) - 1))
     await state.update_data(carousel_idx=idx)
     door = CATALOG[idx]
     img_path = Path(door["image_png"])
     caption = door_caption(door, idx)
     kb = build_carousel_keyboard(idx)
-    # Если это callback — редактируем сообщение, но НЕ вызываем cb.answer() здесь
+
+    # Определяем чат
+    if isinstance(cb_or_msg, CallbackQuery):
+        chat_id = cb_or_msg.message.chat.id
+    else:
+        chat_id = cb_or_msg.chat.id
+
+    # Удаляем предыдущее шаговое сообщение (если было)
+    data = await state.get_data()
+    last_id = data.get("last_bot_message_id")
+    if last_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=last_id)
+        except Exception:
+            pass
+
+    sent_msg = None
+
     if isinstance(cb_or_msg, CallbackQuery):
         try:
-            media = InputMediaPhoto(media=FSInputFile(str(img_path)), caption=caption, parse_mode="HTML")
+            media = InputMediaPhoto(
+                media=FSInputFile(str(img_path)),
+                caption=caption,
+                parse_mode="HTML",
+            )
             await cb_or_msg.message.edit_media(media=media, reply_markup=kb)
+            sent_msg = cb_or_msg.message  # id остаётся тем же
         except Exception:
-            await cb_or_msg.message.answer_photo(
+            sent_msg = await cb_or_msg.message.answer_photo(
                 photo=FSInputFile(str(img_path)),
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=kb,
             )
     else:
-        await cb_or_msg.answer_photo(
+        sent_msg = await cb_or_msg.answer_photo(
             photo=FSInputFile(str(img_path)),
             caption=caption,
             parse_mode="HTML",
             reply_markup=kb,
         )
 
+    if sent_msg is not None:
+        await state.update_data(last_bot_message_id=sent_msg.message_id)
+
+
 # =========================== TELEGRAM BOT FLOW ===========================
 async def send_disclaimer(msg: Message, state: FSMContext):
     disclaimer_text = (
         "⚠️ <b>Важный дисклеймер</b>\n\n"
-        "Этот бот помогает получить общее представление о том, как двери из нашего каталога могут смотреться в вашем интерьере. "
-        "Из-за особенностей генерации изображений реальные цвета, материалы и отдельные объекты интерьера могут отличаться от результата на картинке. "
-        "Это нормально и не является точной рабочей визуализацией для чертежей и подбора отделочных материалов."
+        "Этот бот помогает получить общее представление ..."
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -617,7 +677,8 @@ async def send_disclaimer(msg: Message, state: FSMContext):
     )
     await state.clear()
     await state.set_state(Flow.waiting_disclaimer_ok)
-    await msg.answer(disclaimer_text, parse_mode="HTML", reply_markup=kb)
+    await send_step_message(msg, state, disclaimer_text, reply_markup=kb)
+
 
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
@@ -627,10 +688,17 @@ async def start(m: Message, state: FSMContext):
             [InlineKeyboardButton(text="Подписаться на канал", url=f"https://t.me/{REQUIRED_BUILDER2112.strip('@')}")],
             [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_sub")],
         ])
-        await m.answer("Чтобы пользоваться ботом, подпишись на наш канал и нажми «Проверить подписку».", reply_markup=kb)
+        await send_step_message(
+            m,
+            state,
+            "Чтобы пользоваться ботом, подпишись на наш канал и нажми «Проверить подписку».",
+            reply_markup=kb,
+            parse_mode=None,
+        )
         return
 
     await send_disclaimer(m, state)
+
 
 @router.callback_query(F.data == "check_sub")
 async def check_sub(cb: CallbackQuery, state: FSMContext):
@@ -661,8 +729,15 @@ def build_mode_keyboard() -> InlineKeyboardMarkup:
     )
 
 async def send_mode_menu(msg: Message, state: FSMContext):
-    await msg.answer(MODE_TEXT, parse_mode="HTML", reply_markup=build_mode_keyboard())
+    await send_step_message(
+        msg,
+        state,
+        MODE_TEXT,
+        reply_markup=build_mode_keyboard(),
+        parse_mode="HTML",
+    )
     await state.set_state(Flow.choosing_mode)
+
 
 
 @router.callback_query(Flow.waiting_disclaimer_ok, F.data == "disclaimer_ok")
@@ -673,14 +748,17 @@ async def disclaimer_ok(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(Flow.choosing_mode, F.data == "mode:photo")
 async def mode_photo(cb: CallbackQuery, state: FSMContext):
     await state.update_data(entry_mode="photo")
-    await cb.message.answer(
+    await send_step_message(
+        cb,
+        state,
         "Пришлите <b>фотографию интерьера</b> или дизайн-проекта. "
         "Мы опишем сцену и дальше предложим выбрать дверь.",
-        parse_mode="HTML",
         reply_markup=BACK_INLINE_KB,
+        parse_mode="HTML",
     )
     await state.set_state(Flow.waiting_foto)
     await cb.answer()
+
 
 
 
@@ -692,35 +770,34 @@ async def mode_text_palette(cb: CallbackQuery, state: FSMContext):
         "• Либо сначала текст, потом отдельным сообщением — скрин/фото палитры.\n\n"
         "Как только у нас будет и текст, и палитра, мы создадим детальное описание интерьера на их основе."
     )
-    await cb.message.answer(text, parse_mode="HTML", reply_markup=BACK_INLINE_KB)
+    await send_step_message(cb, state, text, reply_markup=BACK_INLINE_KB, parse_mode="HTML")
     await state.update_data(tp_description=None, tp_palette_path=None, entry_mode="text_palette")
     await state.set_state(Flow.waiting_text_palette)
     await cb.answer()
 
 
 
+
 @router.callback_query(Flow.choosing_mode, F.data == "mode:style")
 async def mode_style(cb: CallbackQuery, state: FSMContext):
     await state.update_data(entry_mode="style")
-    await cb.message.answer(
+    await send_step_message(
+        cb,
+        state,
         "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
         "Дальше вы сможете выбрать дверь и цвет.",
         reply_markup=build_styles_keyboard(),
+        parse_mode=None,
     )
     await state.set_state(Flow.selecting_style)
     await cb.answer()
+
 
 @router.callback_query(F.data == "back")
 async def go_back(cb: CallbackQuery, state: FSMContext):
     cur_state = await state.get_state()
     data = await state.get_data()
-
-    # Удаляем текущее сообщение с кнопками (если это возможно)
-    try:
-        await cb.message.delete()
-    except Exception:
-        pass
-
+    
     # Если по какой-то причине состояния нет — просто в начало
     if cur_state is None:
         await state.clear()
@@ -849,7 +926,12 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
     palette_path = Path(palette_path_str)
 
     await state.set_state(Flow.describing)
-    await m.answer("⏳ Пожалуйста, ожидайте: создаём интерьер по вашему описанию и палитре…")
+    await send_step_message(
+       m,
+       state,
+       "⏳ Пожалуйста, ожидайте: создаём интерьер по вашему описанию и палитре…",
+   )
+
 
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
@@ -874,10 +956,11 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
         tp_description=None,
         tp_palette_path=None,
     )
-
+    
     await m.answer("Теперь выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 @router.callback_query(Flow.selecting_style, F.data.startswith("style:"))
 async def style_selected(cb: CallbackQuery, state: FSMContext):
@@ -889,11 +972,15 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
 
     # ОТВЕЧАЕМ на callback СРАЗУ, пока ещё ничего тяжёлого не делали
     await cb.answer()
-
     _, label_ru, style_prompt = style_entry
-
+    
     await state.set_state(Flow.describing)
-    await cb.message.answer(f"⏳ Создаём интерьер в стиле «{label_ru}»…")
+    await send_step_message(
+        cb,
+        state,
+        f"⏳ Создаём интерьер в стиле «{label_ru}»…",
+    )
+
 
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(run_chat_action(cb.message.chat.id, ChatAction.TYPING, typing_stop))
@@ -915,10 +1002,10 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         interior_description_en=english_desc,
         recommended_colors=recommended_colors,
     )
-
     await cb.message.answer("Теперь выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(cb.message, state, idx=0)
+
     # ЗДЕСЬ больше НЕ нужно cb.answer()
 
 
@@ -931,8 +1018,12 @@ async def got_photo(m: Message, state: FSMContext):
     await tg_download_photo(m, img_path)
 
     await state.set_state(Flow.describing)
-    # Сообщения ожидания + индикатор печати
-    await m.answer("⏳ Пожалуйста, ожидайте: происходит загрузка и анализ вашего изображения…")
+    await send_step_message(
+        m,
+        state,
+        "⏳ Пожалуйста, ожидайте: происходит загрузка и анализ вашего изображения…",
+    )
+
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
 
@@ -956,10 +1047,11 @@ async def got_photo(m: Message, state: FSMContext):
         recommended_colors=recommended_colors,
         carousel_idx=0
     )
-
+    
     await m.answer("Выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 @router.callback_query(Flow.selecting_door, F.data.startswith("carousel:"))
 async def carousel_nav(cb: CallbackQuery, state: FSMContext):
@@ -992,10 +1084,12 @@ async def carousel_nav(cb: CallbackQuery, state: FSMContext):
                 merged.append({"hex": hx, "name": hx})
         kb, descr = build_colors_keyboard_and_text(merged)
         await state.update_data(available_colors=merged)
-        await cb.message.answer(
+        await send_step_message(
+            cb,
+            state,
             f"Модель: <b>{door['name']}</b>\n\n{descr}\n\nВыберите цвет полотна и рамки (фурнитура НЕ перекрашивается):",
+            reply_markup=kb,
             parse_mode="HTML",
-            reply_markup=kb
         )
         await cb.answer()
         await state.set_state(Flow.selecting_color)
@@ -1067,7 +1161,9 @@ async def generate_and_send(m: Message, state: FSMContext):
         return
 
     # Дисклеймер + индикатор
-    await m.answer(
+    await send_step_message(
+        m,
+        state,
         "⏳ Пожалуйста, ожидайте: выполняется генерация вашего интерьера…\n\n"
         "<b>Важно!</b> Иногда изображения могут не соответствовать ожиданиям. "
         "Попробуйте выбрать другую модель двери или другой интерьер. "
@@ -1136,8 +1232,9 @@ async def generate_and_send(m: Message, state: FSMContext):
             ],
         ]
     )
-    await m.answer("Что дальше?", reply_markup=kb)
+    await send_step_message(m, state, "Что дальше?", reply_markup=kb)
     await state.set_state(Flow.after_result)
+
 
 
 @router.callback_query(Flow.after_result, F.data == "again:door")
@@ -1148,16 +1245,25 @@ async def again_door(cb: CallbackQuery, state: FSMContext):
         await state.clear()
         await cb.answer()
         return
-    await cb.message.answer("Выберите другую модель двери (листайте карусель):")
+
+    # этот текст можно вообще не считать отдельным сообщением,
+    # а просто сразу показать карусель:
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(cb.message, state, idx=0)
+    await cb.answer()
 
 @router.callback_query(Flow.after_result, F.data == "again:new")
 async def again_new(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.answer("Пришлите новое фото интерьера.")
+    await send_step_message(
+        cb,
+        state,
+        "Пришлите новое фото интерьера.",
+        reply_markup=BACK_INLINE_KB,
+        parse_mode="HTML",
+    )
     await state.set_state(Flow.waiting_foto)
     await cb.answer()
+
 
 # Блокировка произвольных фото на этапе выбора двери/цвета
 @router.message(Flow.selecting_door, F.photo)
