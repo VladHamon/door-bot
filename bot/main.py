@@ -32,11 +32,12 @@ WATERMARK_WHITELIST_USERNAMES = {
 }
 
 # Если хочешь по ID (они стабильнее, чем username):
-WATERMARK_WHITELIST_IDS = {}
+WATERMARK_WHITELIST_IDS: set[int] = set()
+
 
 
 WATERMARK_PATH = BASE_DIR / "assets" / "watermark.png"
-WATERMARK_ALPHA = 0.35        # прозрачность (0.0–1.0)
+WATERMARK_ALPHA = 0.45        # прозрачность (0.0–1.0)
 WATERMARK_WIDTH_RATIO = 0.25  # ширина водяного знака ~25% ширины картинки
 WATERMARK_MARGIN_RATIO = 0.03 # отступ от краёв ~3% ширины
 
@@ -515,18 +516,25 @@ def apply_watermark(image_bytes: bytes) -> bytes:
 
 from aiogram.types import User
 
-def should_apply_watermark(message: Message) -> bool:
-    user = message.from_user  # type: User | None
-    if not user:
-        return True  # на всякий случай — по умолчанию ставим
+def should_apply_watermark(user: Optional[User]) -> bool:
+    """
+    Возвращает True, если НУЖНО накладывать водяной знак.
+    user передаём явно (а не через message.from_user),
+    чтобы корректно работать и с callback'ами, и с message.
+    """
+    if user is None:
+        return True  # безопасный дефолт — ставим водяной знак
 
     # Проверка по username
-    if user.username and user.username.lower() in {
-        u.lower() for u in WATERMARK_WHITELIST_USERNAMES
-    }:
+    if user.username and user.username.lower() in {u.lower() for u in WATERMARK_WHITELIST_USERNAMES}:
         return False
 
+    # Если потом захочешь по ID:
+    # if user.id in WATERMARK_WHITELIST_IDS:
+    #     return False
+
     return True
+
 
 
 
@@ -1140,7 +1148,7 @@ async def chose_color_from_list(cb: CallbackQuery, state: FSMContext):
         chosen_text = " ".join([v for v in [ral, name] if v]) or hexv or name or "neutral"
         await state.update_data(color_raw=c, color_text=chosen_text)
         await cb.answer()
-        await generate_and_send(cb.message, state)
+        await generate_and_send(cb.message, state, cb.from_user)
     else:
         await cb.answer("Неверный выбор цвета", show_alert=True)
 
@@ -1162,10 +1170,10 @@ async def typed_color(m: Message, state: FSMContext):
         await m.answer("Не удалось распознать цвет. Попробуйте снова: #HEX, RAL XXXX или название.")
         return
     await state.update_data(color_raw={"input": m.text.strip()}, color_text=color_user)
-    await generate_and_send(m, state)
+    await generate_and_send(m, state, m.from_user)
 
-async def generate_and_send(m: Message, state: FSMContext):
-    if not await ensure_subscribed(m.from_user.id):
+async def generate_and_send(m: Message, state: FSMContext, user: User):
+    if not await ensure_subscribed(user.id):
         await m.answer("Сначала подпишитесь на канал и вернитесь с /start.")
         return
 
@@ -1181,7 +1189,6 @@ async def generate_and_send(m: Message, state: FSMContext):
         await state.clear()
         return
 
-    # Находим файл двери
     try:
         door = next(d for d in CATALOG if str(d["id"]) == str(door_id))
     except StopIteration:
@@ -1195,7 +1202,6 @@ async def generate_and_send(m: Message, state: FSMContext):
         await state.clear()
         return
 
-    # Дисклеймер + индикатор
     await send_step_message(
         m,
         state,
@@ -1211,7 +1217,6 @@ async def generate_and_send(m: Message, state: FSMContext):
     )
 
     try:
-        # 1) Генерация изображения Gemini
         img_bytes = await gemini_generate(
             door_png=door_png,
             color_text=color_text,
@@ -1219,11 +1224,10 @@ async def generate_and_send(m: Message, state: FSMContext):
             aspect="3:4",
         )
 
-        # 2) Наложение водяного знака — ТОЛЬКО если пользователь не в whitelist
-        if should_apply_watermark(m):
+        # ВАЖНО: теперь сюда передаём именно user
+        if should_apply_watermark(user):
             img_bytes = apply_watermark(img_bytes)
 
-        # 3) Отправка пользователю изображения
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
             await m.answer_photo(
@@ -1252,7 +1256,6 @@ async def generate_and_send(m: Message, state: FSMContext):
         except Exception:
             pass
 
-    # Предложение продолжить
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -1270,6 +1273,7 @@ async def generate_and_send(m: Message, state: FSMContext):
     )
     await send_step_message(m, state, "Что дальше?", reply_markup=kb)
     await state.set_state(Flow.after_result)
+
 
 
 
