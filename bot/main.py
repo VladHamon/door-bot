@@ -507,6 +507,11 @@ def apply_watermark(image_bytes: bytes) -> bytes:
 
 
 # =========================== UI BUILDERS ===========================
+BACK_INLINE_KB = InlineKeyboardMarkup(
+    inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
+)
+
+
 def build_colors_keyboard_and_text(colors: List[Dict[str, str]]) -> Tuple[InlineKeyboardMarkup, str]:
     """
     Строим кнопки по цветам + краткий поясняющий текст (на русском) над кнопками.
@@ -530,6 +535,7 @@ def build_colors_keyboard_and_text(colors: List[Dict[str, str]]) -> Tuple[Inline
             description_lines.append(f"• {label}: {reason}")
     # Добавим кнопку «Другой цвет»
     rows.append([InlineKeyboardButton(text="🎨 Ввести свой цвет…", callback_data="color:custom")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     description_text = "\n".join(description_lines) if description_lines else "Выберите один из предложенных оттенков или введите свой цвет."
     return kb, description_text
@@ -544,7 +550,9 @@ def build_styles_keyboard() -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def current_catalog_index(state_data: Dict[str, Any]) -> int:
@@ -556,7 +564,9 @@ def build_carousel_keyboard(idx: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Выбрать", callback_data="carousel:choose"),
         InlineKeyboardButton(text="▶", callback_data="carousel:next"),
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[nav])
+    back_row = [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+    return InlineKeyboardMarkup(inline_keyboard=[nav, back_row])
+
 
 def door_caption(door: Dict[str, Any], idx: int) -> str:
     total = len(CATALOG)
@@ -632,36 +642,46 @@ async def check_sub(cb: CallbackQuery, state: FSMContext):
     await send_disclaimer(cb.message, state)
     await cb.answer("Подписка подтверждена!")
 
-@router.callback_query(Flow.waiting_disclaimer_ok, F.data == "disclaimer_ok")
-async def disclaimer_ok(cb: CallbackQuery, state: FSMContext):
-    mode_text = (
-        "Ваш интерьер может быть описан тремя способами:\n\n"
-        "1. <b>Отправить фото интерьера / проекта</b> — мы проанализируем изображение и опишем интерьер без упоминания дверей.\n"
-        "2. <b>Описать интерьер словами и приложить палитру</b> — вы пишете, что хотите видеть, и отправляете фото/скрин палитры цветов.\n"
-        "3. <b>Выбрать стиль из списка</b> — мы создадим интерьер по популярному стилю, а потом вы выберете дверь и цвет.\n\n"
-        "Выберите один из вариантов ниже:"
-    )
-    kb = InlineKeyboardMarkup(
+MODE_TEXT = (
+    "Ваш интерьер может быть описан тремя способами:\n\n"
+    "1. <b>Отправить фото интерьера / проекта</b> — мы проанализируем изображение и опишем интерьер без упоминания дверей.\n"
+    "2. <b>Описать интерьер словами и приложить палитру</b> — вы пишете, что хотите видеть, и отправляете фото/скрин палитры цветов.\n"
+    "3. <b>Выбрать стиль из списка</b> — мы создадим интерьер по популярному стилю, а потом вы выберете дверь и цвет.\n\n"
+    "Выберите один из вариантов ниже:"
+)
+
+def build_mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📷 Отправить фото интерьера/проекта", callback_data="mode:photo")],
             [InlineKeyboardButton(text="📝 Текст + палитра", callback_data="mode:text_palette")],
             [InlineKeyboardButton(text="🎨 Выбрать стиль", callback_data="mode:style")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
         ]
     )
-    await cb.message.answer(mode_text, parse_mode="HTML", reply_markup=kb)
-    await state.set_state(Flow.choosing_mode)
-    await cb.answer()
 
+async def send_mode_menu(msg: Message, state: FSMContext):
+    await msg.answer(MODE_TEXT, parse_mode="HTML", reply_markup=build_mode_keyboard())
+    await state.set_state(Flow.choosing_mode)
+
+
+@router.callback_query(Flow.waiting_disclaimer_ok, F.data == "disclaimer_ok")
+async def disclaimer_ok(cb: CallbackQuery, state: FSMContext):
+    await send_mode_menu(cb.message, state)
+    await cb.answer()
 
 @router.callback_query(Flow.choosing_mode, F.data == "mode:photo")
 async def mode_photo(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(entry_mode="photo")
     await cb.message.answer(
         "Пришлите <b>фотографию интерьера</b> или дизайн-проекта. "
         "Мы опишем сцену и дальше предложим выбрать дверь.",
         parse_mode="HTML",
+        reply_markup=BACK_INLINE_KB,
     )
     await state.set_state(Flow.waiting_foto)
     await cb.answer()
+
 
 
 @router.callback_query(Flow.choosing_mode, F.data == "mode:text_palette")
@@ -672,14 +692,16 @@ async def mode_text_palette(cb: CallbackQuery, state: FSMContext):
         "• Либо сначала текст, потом отдельным сообщением — скрин/фото палитры.\n\n"
         "Как только у нас будет и текст, и палитра, мы создадим детальное описание интерьера на их основе."
     )
-    await cb.message.answer(text, parse_mode="HTML")
-    await state.update_data(tp_description=None, tp_palette_path=None)
+    await cb.message.answer(text, parse_mode="HTML", reply_markup=BACK_INLINE_KB)
+    await state.update_data(tp_description=None, tp_palette_path=None, entry_mode="text_palette")
     await state.set_state(Flow.waiting_text_palette)
     await cb.answer()
 
 
+
 @router.callback_query(Flow.choosing_mode, F.data == "mode:style")
 async def mode_style(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(entry_mode="style")
     await cb.message.answer(
         "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
         "Дальше вы сможете выбрать дверь и цвет.",
@@ -687,6 +709,92 @@ async def mode_style(cb: CallbackQuery, state: FSMContext):
     )
     await state.set_state(Flow.selecting_style)
     await cb.answer()
+
+@router.callback_query(F.data == "back")
+async def go_back(cb: CallbackQuery, state: FSMContext):
+    cur_state = await state.get_state()
+    data = await state.get_data()
+
+    # Удаляем текущее сообщение с кнопками (если это возможно)
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+
+    # Если по какой-то причине состояния нет — просто в начало
+    if cur_state is None:
+        await state.clear()
+        await start(cb.message, state)
+        await cb.answer()
+        return
+
+    # 1) Из меню выбора режима — назад к дисклеймеру
+    if cur_state == Flow.choosing_mode.state:
+        await send_disclaimer(cb.message, state)
+
+    # 2) Ждали фото — назад к выбору режима
+    elif cur_state == Flow.waiting_foto.state:
+        await send_mode_menu(cb.message, state)
+
+    # 3) Ждали текст+палитру — чистим временные данные и назад к выбору режима
+    elif cur_state == Flow.waiting_text_palette.state:
+        await state.update_data(tp_description=None, tp_palette_path=None)
+        await send_mode_menu(cb.message, state)
+
+    # 4) Выбор стиля — назад к выбору режима
+    elif cur_state == Flow.selecting_style.state:
+        await send_mode_menu(cb.message, state)
+
+    # 5) Выбор двери — назад зависит от entry_mode
+    elif cur_state == Flow.selecting_door.state:
+        entry_mode = data.get("entry_mode")
+        if entry_mode == "photo":
+            await state.set_state(Flow.waiting_foto)
+            await cb.message.answer(
+                "Пришлите <b>фотографию интерьера</b> или дизайн-проекта. "
+                "Мы опишем сцену и дальше предложим выбрать дверь.",
+                parse_mode="HTML",
+                reply_markup=BACK_INLINE_KB,
+            )
+        elif entry_mode == "text_palette":
+            await state.set_state(Flow.waiting_text_palette)
+            text = (
+                "Опишите, пожалуйста, ваш интерьер словами и приложите <b>палитру</b> цветов:\n\n"
+                "• Можно отправить одно сообщение с картинкой палитры и описанием в подписи.\n"
+                "• Либо сначала текст, потом отдельным сообщением — скрин/фото палитры.\n\n"
+                "Как только у нас будет и текст, и палитра, мы создадим детальное описание интерьера на их основе."
+            )
+            await cb.message.answer(text, parse_mode="HTML", reply_markup=BACK_INLINE_KB)
+        elif entry_mode == "style":
+            await state.set_state(Flow.selecting_style)
+            await cb.message.answer(
+                "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
+                "Дальше вы сможете выбрать дверь и цвет.",
+                reply_markup=build_styles_keyboard(),
+            )
+        else:
+            # Fallback: возвращаемся к выбору режима
+            await send_mode_menu(cb.message, state)
+
+    # 6) Выбор цвета — назад к карусели дверей
+    elif cur_state == Flow.selecting_color.state:
+        idx = current_catalog_index(data)
+        await state.set_state(Flow.selecting_door)
+        await cb.message.answer("Выберите модель двери (листайте карусель):")
+        await show_or_update_carousel(cb.message, state, idx=idx)
+
+    # 7) После результата — назад = «выбрать другую дверь»
+    elif cur_state == Flow.after_result.state:
+        await again_door(cb, state)
+        # again_door сам поставит состояние и отправит нужные сообщения
+
+    # 8) На всякий случай — в начало
+    else:
+        await state.clear()
+        await start(cb.message, state)
+
+    await cb.answer()
+
 
 @router.message(Flow.waiting_text_palette)
 async def handle_text_palette(m: Message, state: FSMContext):
@@ -1042,7 +1150,7 @@ async def again_door(cb: CallbackQuery, state: FSMContext):
         return
     await cb.message.answer("Выберите другую модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
-    await show_or_update_carousel(cb, state, idx=0)
+    await show_or_update_carousel(cb.message, state, idx=0)
 
 @router.callback_query(Flow.after_result, F.data == "again:new")
 async def again_new(cb: CallbackQuery, state: FSMContext):
