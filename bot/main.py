@@ -679,7 +679,6 @@ async def send_disclaimer(msg: Message, state: FSMContext):
             [InlineKeyboardButton(text="OK", callback_data="disclaimer_ok")]
         ]
     )
-    await state.clear()
     await state.set_state(Flow.waiting_disclaimer_ok)
     await send_step_message(msg, state, disclaimer_text, reply_markup=kb)
 
@@ -831,11 +830,13 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
         entry_mode = data.get("entry_mode")
         if entry_mode == "photo":
             await state.set_state(Flow.waiting_foto)
-            await cb.message.answer(
+            await send_step_message(
+                cb,
+                state,
                 "Пришлите <b>фотографию интерьера</b> или дизайн-проекта. "
                 "Мы опишем сцену и дальше предложим выбрать дверь.",
-                parse_mode="HTML",
                 reply_markup=BACK_INLINE_KB,
+                parse_mode="HTML",
             )
         elif entry_mode == "text_palette":
             await state.set_state(Flow.waiting_text_palette)
@@ -845,17 +846,20 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
                 "• Либо сначала текст, потом отдельным сообщением — скрин/фото палитры.\n\n"
                 "Как только у нас будет и текст, и палитра, мы создадим детальное описание интерьера на их основе."
             )
-            await cb.message.answer(text, parse_mode="HTML", reply_markup=BACK_INLINE_KB)
+            await send_step_message(cb, state, text, reply_markup=BACK_INLINE_KB, parse_mode="HTML")
         elif entry_mode == "style":
             await state.set_state(Flow.selecting_style)
-            await cb.message.answer(
+            await send_step_message(
+                cb,
+                state,
                 "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
                 "Дальше вы сможете выбрать дверь и цвет.",
                 reply_markup=build_styles_keyboard(),
+                parse_mode=None,
             )
         else:
-            # Fallback: возвращаемся к выбору режима
             await send_mode_menu(cb.message, state)
+
 
     # 6) Выбор цвета — назад к карусели дверей
     elif cur_state == Flow.selecting_color.state:
@@ -1117,7 +1121,12 @@ async def chose_color_from_list(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(Flow.selecting_color, F.data == "color:custom")
 async def ask_custom_color(cb: CallbackQuery, state: FSMContext):
-    await cb.message.answer("Напишите цвет: #HEX (например <code>#F3F0E6</code>), или <code>RAL 9010</code>, или простым словом (white, beige…).", parse_mode="HTML")
+    await send_step_message(
+        cb,
+        state,
+        "Напишите цвет: #HEX (например <code>#F3F0E6</code>), или <code>RAL 9010</code>, или простым словом (white, beige…).",
+        parse_mode="HTML",
+    )
     await cb.answer()
 
 @router.message(Flow.selecting_color)
