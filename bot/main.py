@@ -603,7 +603,11 @@ def build_carousel_keyboard(idx: int) -> InlineKeyboardMarkup:
 
 def door_caption(door: Dict[str, Any], idx: int) -> str:
     total = len(CATALOG)
-    return f"<b>{door.get('name','Дверь')}</b>\nМодель {idx+1} из {total}"
+    return (
+        f"<b>{door.get('name', 'Дверь')}</b>\n"
+        f"Модель {idx+1} из {total}\n\n"
+        "Выберите модель двери (листайте карусель):"
+    )
 
 async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
     """
@@ -724,9 +728,9 @@ def build_mode_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📷 Отправить фото интерьера/проекта", callback_data="mode:photo")],
             [InlineKeyboardButton(text="📝 Текст + палитра", callback_data="mode:text_palette")],
             [InlineKeyboardButton(text="🎨 Выбрать стиль", callback_data="mode:style")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
         ]
     )
+
 
 async def send_mode_menu(msg: Message, state: FSMContext):
     await send_step_message(
@@ -857,7 +861,6 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
     elif cur_state == Flow.selecting_color.state:
         idx = current_catalog_index(data)
         await state.set_state(Flow.selecting_door)
-        await cb.message.answer("Выберите модель двери (листайте карусель):")
         await show_or_update_carousel(cb.message, state, idx=idx)
 
     # 7) После результата — назад = «выбрать другую дверь»
@@ -957,7 +960,6 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
         tp_palette_path=None,
     )
     
-    await m.answer("Теперь выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
 
@@ -1002,7 +1004,7 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         interior_description_en=english_desc,
         recommended_colors=recommended_colors,
     )
-    await cb.message.answer("Теперь выберите модель двери (листайте карусель):")
+    
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(cb.message, state, idx=0)
 
@@ -1048,7 +1050,6 @@ async def got_photo(m: Message, state: FSMContext):
         carousel_idx=0
     )
     
-    await m.answer("Выберите модель двери (листайте карусель):")
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
 
