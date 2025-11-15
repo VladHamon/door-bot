@@ -526,10 +526,6 @@ def should_apply_watermark(message: Message) -> bool:
     }:
         return False
 
-    # Проверка по user_id
-    if user.id in WATERMARK_WHITELIST_IDS:
-        return False
-
     return True
 
 
