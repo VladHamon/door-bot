@@ -28,7 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Список пользователей, которым отправляем картинки БЕЗ водяного знака
 WATERMARK_WHITELIST_USERNAMES = {
-    "@Vlodekteper", 
+    "Vlodekteper", 
 }
 
 # Если хочешь по ID (они стабильнее, чем username):
