@@ -27,7 +27,7 @@ import httpx
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 WATERMARK_PATH = BASE_DIR / "assets" / "watermark.png"
-WATERMARK_ALPHA = 0.20        # прозрачность (0.0–1.0)
+WATERMARK_ALPHA = 0.35        # прозрачность (0.0–1.0)
 WATERMARK_WIDTH_RATIO = 0.25  # ширина водяного знака ~25% ширины картинки
 WATERMARK_MARGIN_RATIO = 0.03 # отступ от краёв ~3% ширины
 
