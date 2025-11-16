@@ -41,6 +41,8 @@ WATERMARK_ALPHA = 0.45        # прозрачность (0.0–1.0)
 WATERMARK_WIDTH_RATIO = 0.25  # ширина водяного знака ~25% ширины картинки
 WATERMARK_MARGIN_RATIO = 0.03 # отступ от краёв ~3% ширины
 
+LOADING_STICKER_ID = "CAACAgEAAxkBAAIHPWkaOIiT4mpoVSdkmYYCA7ByhCLVAAKAAgACoWMZRKtYP6IFwk3cNgQ"  # сюда вставь реальный file_id своего стикера
+
 # =========================== ENV ==========================
 load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -938,6 +940,72 @@ async def send_step_message(
     await state.update_data(last_bot_message_id=sent.message_id)
     return sent
 
+async def show_loading(
+    target,
+    state: FSMContext,
+    text: str,
+    parse_mode: Optional[str] = "HTML",
+):
+    """
+    Показывает шаговое сообщение об ожидании + анимированный стикер-песочные часы.
+    Сохраняет message_id стикера и сообщения в state.
+    """
+    # 1) шаговое сообщение с текстом (удалит предыдущий step, если был)
+    loading_msg = await send_step_message(
+        target,
+        state,
+        text=text,
+        reply_markup=None,
+        parse_mode=parse_mode,
+    )
+
+    # 2) отправляем стикер в тот же чат
+    if isinstance(target, CallbackQuery):
+        base_msg = target.message
+    else:
+        base_msg = target
+
+    sticker_msg = None
+    if LOADING_STICKER_ID:
+        try:
+            sticker_msg = await base_msg.answer_sticker(LOADING_STICKER_ID)
+        except Exception as e:
+            print("LOADING_STICKER_SEND_ERROR:", repr(e))
+
+    # 3) сохраняем id стикера в state
+    if sticker_msg is not None:
+        await state.update_data(loading_sticker_id=sticker_msg.message_id)
+
+    return loading_msg, sticker_msg
+
+
+async def clear_loading(chat_id: int, state: FSMContext):
+    """
+    Удаляет сообщение об ожидании и стикер-песочные часы, если они есть.
+    Очищает last_bot_message_id и loading_sticker_id.
+    """
+    data = await state.get_data()
+    sticker_id = data.get("loading_sticker_id")
+    last_id = data.get("last_bot_message_id")
+
+    # удаляем стикер
+    if sticker_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=sticker_id)
+        except Exception as e:
+            print("LOADING_STICKER_DELETE_ERROR:", repr(e))
+
+    # удаляем сообщение об ожидании
+    if last_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=last_id)
+        except Exception as e:
+            print("LOADING_MSG_DELETE_ERROR:", repr(e))
+
+    # очищаем state
+    await state.update_data(loading_sticker_id=None, last_bot_message_id=None)
+
+
 
 def build_colors_keyboard_and_text(colors: List[Dict[str, str]]) -> Tuple[InlineKeyboardMarkup, str]:
     """
@@ -1337,7 +1405,9 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
     palette_path = Path(palette_path_str)
 
     await state.set_state(Flow.describing)
-    await send_step_message(
+
+    # 1) Сообщение об ожидании + стикер-песочные часы
+    await show_loading(
         m,
         state,
         "⏳ Пожалуйста, ожидайте: создаём интерьер по вашему описанию и палитре…",
@@ -1353,6 +1423,9 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
     json_data: Optional[dict] = None
 
     try:
+        # ДВА запроса параллельно:
+        # 1) детальное англ. описание (для генерации изображения)
+        # 2) JSON с кратким описанием, стилями и цветами
         task_desc = asyncio.create_task(
             describe_scene_from_text_and_palette(desc, palette_path)
         )
@@ -1376,6 +1449,8 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
             await typing_task
         except Exception:
             pass
+        # 2) Убираем сообщение об ожидании и стикер
+        await clear_loading(m.chat.id, state)
 
     # --------- Разбор JSON второй модели с валидацией ---------
     interior_json_valid = False
@@ -1390,7 +1465,7 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
         )
 
     # Если JSON валиден — показываем краткое RU-описание.
-    # Если битый — НЕ показываем вообще ничего.
+    # Если битый — НЕ показываем вообще ничего (даже english_desc).
     if interior_json_valid:
         to_show = summary_ru.strip()
         if to_show:
@@ -1436,7 +1511,9 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
     _, label_ru, style_prompt = style_entry
 
     await state.set_state(Flow.describing)
-    await send_step_message(
+
+    # 1) Сообщение об ожидании + стикер-песочные часы
+    await show_loading(
         cb,
         state,
         f"⏳ Создаём интерьер в стиле «{label_ru}»…",
@@ -1452,6 +1529,9 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
     json_data: Optional[dict] = None
 
     try:
+        # ДВА запроса параллельно:
+        # 1) детальное англ. описание интерьера (для генерации картинки)
+        # 2) JSON с кратким описанием, стилями и цветами
         task_desc = asyncio.create_task(
             describe_scene_from_style(style_prompt)
         )
@@ -1475,7 +1555,10 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
             await typing_task
         except Exception:
             pass
+        # 2) Убираем сообщение об ожидании и стикер
+        await clear_loading(cb.message.chat.id, state)
 
+    # --------- Разбор JSON второй модели с валидацией ---------
     interior_json_valid = False
     summary_ru = ""
     styles_profile: Dict[str, Any] = {}
@@ -1488,6 +1571,7 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         )
 
     # Показываем краткое RU-описание ТОЛЬКО если JSON валиден.
+    # Если JSON битый — вообще ничего не показываем (ни json, ни english_desc).
     if interior_json_valid:
         to_show = summary_ru.strip()
         if to_show:
@@ -1496,6 +1580,7 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
             ):
                 await cb.message.answer(truncate(chunk), parse_mode=None)
 
+    # Порядок дверей: по стилям только если JSON валиден
     door_order = compute_door_order(styles_profile) if interior_json_valid else None
 
     payload: Dict[str, Any] = {
@@ -1527,7 +1612,9 @@ async def got_photo(m: Message, state: FSMContext):
     await tg_download_photo(m, img_path)
 
     await state.set_state(Flow.describing)
-    await send_step_message(
+
+    # 1) Сообщение об ожидании + анимированный стикер-песочные часы
+    await show_loading(
         m,
         state,
         "⏳ Пожалуйста, ожидайте: происходит загрузка и анализ вашего изображения…",
@@ -1566,6 +1653,8 @@ async def got_photo(m: Message, state: FSMContext):
             await typing_task
         except Exception:
             pass
+        # 2) Убираем сообщение об ожидании и стикер
+        await clear_loading(m.chat.id, state)
 
     # --------- Разбор JSON второй модели с валидацией ---------
     interior_json_valid = False
@@ -1579,7 +1668,7 @@ async def got_photo(m: Message, state: FSMContext):
             extract_interior_profile(json_data)
         )
 
-    # 1) Что показываем пользователю:
+    # 3) Показываем пользователю:
     #    - если JSON валиден → краткое RU-описание
     #    - если JSON битый → НИЧЕГО не показываем (даже english_desc)
     if interior_json_valid:
@@ -1590,12 +1679,12 @@ async def got_photo(m: Message, state: FSMContext):
             ):
                 await m.answer(truncate(chunk), parse_mode=None)
 
-    # 2) Порядок дверей:
+    # 4) Порядок дверей:
     #    - если JSON валиден → сортируем по стилям
     #    - если нет → не записываем door_order, карусель покажет CATALOG как есть
     door_order = compute_door_order(styles_profile) if interior_json_valid else None
 
-    # 3) Сохраняем всё нужное в state
+    # 5) Сохраняем всё нужное в state
     payload: Dict[str, Any] = {
         "interior_path": str(img_path),
         "interior_description_en": english_desc,  # для генерации картинки
@@ -1611,11 +1700,12 @@ async def got_photo(m: Message, state: FSMContext):
 
     await state.update_data(**payload)
 
-    # 4) Карусель дверей:
+    # 6) Карусель дверей:
     #    - если есть door_order → по стилям
     #    - если нет → в дефолтном порядке CATALOG
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 
 
@@ -1808,7 +1898,8 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
         await state.clear()
         return
 
-    await send_step_message(
+    # 1) Сообщение ожидания + стикер-песочные часы
+    await show_loading(
         m,
         state,
         "⏳ Пожалуйста, ожидайте: выполняется генерация вашего интерьера…\n\n"
@@ -1817,12 +1908,14 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
         "Цвета на изображении носят ориентировочный характер.",
         parse_mode="HTML",
     )
+
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(
         run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
     )
 
     try:
+        # Генерация изображения двери
         img_bytes = await gemini_generate(
             door_png=door_png,
             color_text=color_text,
@@ -1830,7 +1923,7 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
             aspect="3:4",
         )
 
-        # ВАЖНО: теперь сюда передаём именно user
+        # ВАЖНО: сюда передаём именно user для whitelist'а
         if should_apply_watermark(user):
             img_bytes = apply_watermark(img_bytes)
 
@@ -1861,7 +1954,10 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
             await typing_task
         except Exception:
             pass
+        # 2) Убираем сообщение ожидания и стикер
+        await clear_loading(m.chat.id, state)
 
+    # 3) Спрашиваем, что делать дальше
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -1879,6 +1975,7 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
     )
     await send_step_message(m, state, "Что дальше?", reply_markup=kb)
     await state.set_state(Flow.after_result)
+
 
 
 
