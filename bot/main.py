@@ -41,7 +41,7 @@ WATERMARK_ALPHA = 0.45        # прозрачность (0.0–1.0)
 WATERMARK_WIDTH_RATIO = 0.25  # ширина водяного знака ~25% ширины картинки
 WATERMARK_MARGIN_RATIO = 0.03 # отступ от краёв ~3% ширины
 
-# =========================== ENV ===========================
+# =========================== ENV ==========================
 load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
