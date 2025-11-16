@@ -396,27 +396,45 @@ def _parse_interior_json(txt: str) -> Optional[dict]:
     txt = txt.strip()
     if not txt:
         return None
-    # пробуем как есть
+
+    # 1) Прямой parse как есть
     try:
         return json.loads(txt)
-    except Exception:
-        pass
-    # fallback — ищем JSON-блок внутри
+    except Exception as e:
+        print("INTERIOR_JSON_PARSE_ERROR (direct):", repr(e))
+
+    # 2) Fallback — ищем JSON-блок внутри текста
     j = extract_json_block(txt)
+    if not j:
+        print("INTERIOR_JSON_EXTRACT_FAILED, raw text snippet:", txt[:500])
     return j
+
 
 
 async def analyze_scene_json_from_image(image_path: Path) -> Optional[dict]:
     """JSON-анализ интерьера по фото."""
     client = genai.Client(api_key=GEMINI_API_KEY)
     img = Image.open(image_path).convert("RGB")
+
+    cfg = types.GenerateContentConfig(
+        temperature=0.2,
+        response_mime_type="application/json",
+    )
+
     resp = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=[INTERIOR_JSON_PROMPT, img],
-        config=types.GenerateContentConfig(temperature=0.2),
+        config=cfg,
     )
+
     txt = _resp_text(resp).strip()
-    return _parse_interior_json(txt)
+    try:
+        data = json.loads(txt)
+        return data
+    except Exception as e:
+        print("INTERIOR_JSON_IMAGE_PARSE_ERROR:", repr(e))
+        return _parse_interior_json(txt)
+
 
 
 async def analyze_scene_json_from_text_and_palette(
@@ -431,13 +449,23 @@ async def analyze_scene_json_from_text_and_palette(
         img = Image.open(palette_image_path).convert("RGB")
         contents.append(img)
 
+    cfg = types.GenerateContentConfig(
+        temperature=0.2,
+        response_mime_type="application/json",
+    )
+
     resp = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents,
-        config=types.GenerateContentConfig(temperature=0.2),
+        config=cfg,
     )
     txt = _resp_text(resp).strip()
-    return _parse_interior_json(txt)
+    try:
+        data = json.loads(txt)
+        return data
+    except Exception as e:
+        print("INTERIOR_JSON_TEXT_PALETTE_PARSE_ERROR:", repr(e))
+        return _parse_interior_json(txt)
 
 
 async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
@@ -449,13 +477,24 @@ async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
         f"Интерьер в стиле: {style_prompt}",
     ]
 
+    cfg = types.GenerateContentConfig(
+        temperature=0.2,
+        response_mime_type="application/json",
+    )
+
     resp = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents,
-        config=types.GenerateContentConfig(temperature=0.2),
+        config=cfg,
     )
     txt = _resp_text(resp).strip()
-    return _parse_interior_json(txt)
+    try:
+        data = json.loads(txt)
+        return data
+    except Exception as e:
+        print("INTERIOR_JSON_STYLE_PARSE_ERROR:", repr(e))
+        return _parse_interior_json(txt)
+
 
 
 # =========================== 1) ОПИСАНИЕ СЦЕНЫ (Gemini 2.5 Pro) ===========================
@@ -1420,6 +1459,7 @@ async def got_photo(m: Message, state: FSMContext):
 
         english_desc, rec_colors_1 = await task_desc
         json_data = await task_json
+        print("DEBUG_INTERIOR_JSON:", json.dumps(json_data, ensure_ascii=False) if isinstance(json_data, dict) else json_data)
     finally:
         typing_stop.set()
         try:
