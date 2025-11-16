@@ -397,17 +397,16 @@ def _parse_interior_json(txt: str) -> Optional[dict]:
     if not txt:
         return None
 
-    # 1) Прямой parse как есть
     try:
         return json.loads(txt)
     except Exception as e:
         print("INTERIOR_JSON_PARSE_ERROR (direct):", repr(e))
 
-    # 2) Fallback — ищем JSON-блок внутри текста
     j = extract_json_block(txt)
     if not j:
-        print("INTERIOR_JSON_EXTRACT_FAILED, raw text snippet:", txt[:500])
+        print("INTERIOR_JSON_EXTRACT_FAILED, raw snippet:", txt[:500])
     return j
+
 
 
 
@@ -426,14 +425,13 @@ async def analyze_scene_json_from_image(image_path: Path) -> Optional[dict]:
         contents=[INTERIOR_JSON_PROMPT, img],
         config=cfg,
     )
-
     txt = _resp_text(resp).strip()
     try:
-        data = json.loads(txt)
-        return data
+        return json.loads(txt)
     except Exception as e:
         print("INTERIOR_JSON_IMAGE_PARSE_ERROR:", repr(e))
         return _parse_interior_json(txt)
+
 
 
 
@@ -461,11 +459,11 @@ async def analyze_scene_json_from_text_and_palette(
     )
     txt = _resp_text(resp).strip()
     try:
-        data = json.loads(txt)
-        return data
+        return json.loads(txt)
     except Exception as e:
         print("INTERIOR_JSON_TEXT_PALETTE_PARSE_ERROR:", repr(e))
         return _parse_interior_json(txt)
+
 
 
 async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
@@ -489,11 +487,11 @@ async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
     )
     txt = _resp_text(resp).strip()
     try:
-        data = json.loads(txt)
-        return data
+        return json.loads(txt)
     except Exception as e:
         print("INTERIOR_JSON_STYLE_PARSE_ERROR:", repr(e))
         return _parse_interior_json(txt)
+
 
 
 
@@ -846,6 +844,56 @@ def compute_door_order(styles_profile: Dict[str, Any]) -> List[int]:
 
     orders.sort(key=lambda x: x[1])
     return [i for (i, _) in orders]
+
+def extract_interior_profile(
+    json_data: Optional[dict],
+) -> Tuple[bool, str, Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Пытаемся вытащить данные из JSON второй модели.
+    Возвращаем:
+      - valid: bool — можно ли вообще использовать этот JSON?
+      - summary_ru: краткое RU-описание
+      - styles_profile: dict стилей
+      - recommended_colors_json: список цветов для UI-кнопок
+      - door_colors_json: список цветов двери с пояснением "why"
+    Если что-то важное отсутствует — считаем JSON "битым" и возвращаем valid=False.
+    """
+    summary_ru = ""
+    styles_profile: Dict[str, Any] = {}
+    recommended_colors_json: List[Dict[str, Any]] = []
+    door_colors_json: List[Dict[str, Any]] = []
+
+    if not isinstance(json_data, dict):
+        return False, summary_ru, styles_profile, recommended_colors_json, door_colors_json
+
+    summary = json_data.get("summary") or {}
+    styles = json_data.get("styles") or {}
+    rec = json_data.get("recommended_colors") or []
+    door_cols = summary.get("door_colors") or []
+
+    summary_val = summary.get("interior_description")
+    summary_ok = isinstance(summary_val, str) and summary_val.strip()
+    styles_ok = isinstance(styles, dict) and len(styles) > 0
+    rec_ok = isinstance(rec, list) and len(rec) > 0
+
+    valid = bool(summary_ok and styles_ok and rec_ok)
+    if not valid:
+        print(
+            "INTERIOR_JSON_VALIDATION_FAILED:",
+            "summary_ok=", bool(summary_ok),
+            "styles_ok=", bool(styles_ok),
+            "rec_ok=", bool(rec_ok),
+        )
+        return False, "", {}, [], []
+
+    summary_ru = summary_val.strip()
+    styles_profile = styles
+    recommended_colors_json = rec
+    if isinstance(door_cols, list):
+        door_colors_json = door_cols
+
+    return True, summary_ru, styles_profile, recommended_colors_json, door_colors_json
+
 
 
 
@@ -1294,7 +1342,9 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
     )
 
     typing_stop = asyncio.Event()
-    typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
+    typing_task = asyncio.create_task(
+        run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop)
+    )
 
     english_desc = ""
     rec_colors_1: List[Dict[str, str]] = []
@@ -1310,6 +1360,14 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
 
         english_desc, rec_colors_1 = await task_desc
         json_data = await task_json
+
+        if isinstance(json_data, dict):
+            print(
+                "DEBUG_INTERIOR_JSON_TEXT_PALETTE:",
+                json.dumps(json_data, ensure_ascii=False)[:800],
+            )
+        else:
+            print("DEBUG_INTERIOR_JSON_TEXT_PALETTE (non-dict):", json_data)
     finally:
         typing_stop.set()
         try:
@@ -1317,39 +1375,50 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
         except Exception:
             pass
 
+    # --------- Разбор JSON второй модели с валидацией ---------
+    interior_json_valid = False
     summary_ru = ""
     styles_profile: Dict[str, Any] = {}
     recommended_colors_json: List[Dict[str, Any]] = []
     door_colors_json: List[Dict[str, Any]] = []
 
-    if isinstance(json_data, dict):
-        summary = json_data.get("summary", {}) or {}
-        summary_ru = summary.get("interior_description", "") or ""
-        door_colors_json = summary.get("door_colors", []) or []
-        styles_profile = json_data.get("styles", {}) or {}
-        recommended_colors_json = json_data.get("recommended_colors", []) or []
+    if json_data is not None:
+        interior_json_valid, summary_ru, styles_profile, recommended_colors_json, door_colors_json = (
+            extract_interior_profile(json_data)
+        )
 
-    to_show = summary_ru.strip() or english_desc.strip()
-    if to_show:
-        for chunk in textwrap.wrap(to_show, 3500, replace_whitespace=False, drop_whitespace=False):
-            await m.answer(truncate(chunk), parse_mode=None)
+    # Если JSON валиден — показываем краткое RU-описание.
+    # Если битый — НЕ показываем вообще ничего.
+    if interior_json_valid:
+        to_show = summary_ru.strip()
+        if to_show:
+            for chunk in textwrap.wrap(
+                to_show, 3500, replace_whitespace=False, drop_whitespace=False
+            ):
+                await m.answer(truncate(chunk), parse_mode=None)
 
-    door_order = compute_door_order(styles_profile)
+    # Порядок дверей: по стилям только если JSON валиден
+    door_order = compute_door_order(styles_profile) if interior_json_valid else None
 
-    await state.update_data(
-        interior_description_en=english_desc,
-        styles_profile=styles_profile,
-        summary_ru=summary_ru,
-        recommended_colors_json=recommended_colors_json,
-        door_colors_json=door_colors_json,
-        interior_path=str(palette_path),
-        tp_description=None,
-        tp_palette_path=None,
-        door_order=door_order,
-    )
+    payload: Dict[str, Any] = {
+        "interior_description_en": english_desc,
+        "styles_profile": styles_profile if interior_json_valid else {},
+        "summary_ru": summary_ru if interior_json_valid else "",
+        "recommended_colors_json": recommended_colors_json if interior_json_valid else [],
+        "door_colors_json": door_colors_json if interior_json_valid else [],
+        "interior_path": str(palette_path),
+        "tp_description": None,
+        "tp_palette_path": None,
+        "interior_json_valid": interior_json_valid,
+    }
+    if door_order is not None:
+        payload["door_order"] = door_order
+
+    await state.update_data(**payload)
 
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 
 
@@ -1372,7 +1441,9 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
     )
 
     typing_stop = asyncio.Event()
-    typing_task = asyncio.create_task(run_chat_action(cb.message.chat.id, ChatAction.TYPING, typing_stop))
+    typing_task = asyncio.create_task(
+        run_chat_action(cb.message.chat.id, ChatAction.TYPING, typing_stop)
+    )
 
     english_desc = ""
     rec_colors_1: List[Dict[str, str]] = []
@@ -1388,6 +1459,14 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
 
         english_desc, rec_colors_1 = await task_desc
         json_data = await task_json
+
+        if isinstance(json_data, dict):
+            print(
+                "DEBUG_INTERIOR_JSON_STYLE:",
+                json.dumps(json_data, ensure_ascii=False)[:800],
+            )
+        else:
+            print("DEBUG_INTERIOR_JSON_STYLE (non-dict):", json_data)
     finally:
         typing_stop.set()
         try:
@@ -1395,33 +1474,40 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
+    interior_json_valid = False
     summary_ru = ""
     styles_profile: Dict[str, Any] = {}
     recommended_colors_json: List[Dict[str, Any]] = []
     door_colors_json: List[Dict[str, Any]] = []
 
-    if isinstance(json_data, dict):
-        summary = json_data.get("summary", {}) or {}
-        summary_ru = summary.get("interior_description", "") or ""
-        door_colors_json = summary.get("door_colors", []) or []
-        styles_profile = json_data.get("styles", {}) or {}
-        recommended_colors_json = json_data.get("recommended_colors", []) or []
+    if json_data is not None:
+        interior_json_valid, summary_ru, styles_profile, recommended_colors_json, door_colors_json = (
+            extract_interior_profile(json_data)
+        )
 
-    to_show = summary_ru.strip() or english_desc.strip()
-    if to_show:
-        for chunk in textwrap.wrap(to_show, 3500, replace_whitespace=False, drop_whitespace=False):
-            await cb.message.answer(truncate(chunk), parse_mode=None)
+    # Показываем краткое RU-описание ТОЛЬКО если JSON валиден.
+    if interior_json_valid:
+        to_show = summary_ru.strip()
+        if to_show:
+            for chunk in textwrap.wrap(
+                to_show, 3500, replace_whitespace=False, drop_whitespace=False
+            ):
+                await cb.message.answer(truncate(chunk), parse_mode=None)
 
-    door_order = compute_door_order(styles_profile)
+    door_order = compute_door_order(styles_profile) if interior_json_valid else None
 
-    await state.update_data(
-        interior_description_en=english_desc,
-        styles_profile=styles_profile,
-        summary_ru=summary_ru,
-        recommended_colors_json=recommended_colors_json,
-        door_colors_json=door_colors_json,
-        door_order=door_order,
-    )
+    payload: Dict[str, Any] = {
+        "interior_description_en": english_desc,
+        "styles_profile": styles_profile if interior_json_valid else {},
+        "summary_ru": summary_ru if interior_json_valid else "",
+        "recommended_colors_json": recommended_colors_json if interior_json_valid else [],
+        "door_colors_json": door_colors_json if interior_json_valid else [],
+        "interior_json_valid": interior_json_valid,
+    }
+    if door_order is not None:
+        payload["door_order"] = door_order
+
+    await state.update_data(**payload)
 
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(cb.message, state, idx=0)
@@ -1446,20 +1532,32 @@ async def got_photo(m: Message, state: FSMContext):
     )
 
     typing_stop = asyncio.Event()
-    typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
+    typing_task = asyncio.create_task(
+        run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop)
+    )
 
     english_desc = ""
     rec_colors_1: List[Dict[str, str]] = []
     json_data: Optional[dict] = None
 
     try:
-        # ДВА запроса параллельно
+        # ДВА запроса параллельно:
+        # 1) старое детальное англ. описание (для генерации изображения)
+        # 2) новый JSON с кратким описанием, стилями и цветами
         task_desc = asyncio.create_task(describe_scene_with_gemini(img_path))
         task_json = asyncio.create_task(analyze_scene_json_from_image(img_path))
 
         english_desc, rec_colors_1 = await task_desc
         json_data = await task_json
-        print("DEBUG_INTERIOR_JSON:", json.dumps(json_data, ensure_ascii=False) if isinstance(json_data, dict) else json_data)
+
+        # лог для дебага — можно потом убрать
+        if isinstance(json_data, dict):
+            print(
+                "DEBUG_INTERIOR_JSON:",
+                json.dumps(json_data, ensure_ascii=False)[:800],
+            )
+        else:
+            print("DEBUG_INTERIOR_JSON (non-dict):", json_data)
     finally:
         typing_stop.set()
         try:
@@ -1467,44 +1565,56 @@ async def got_photo(m: Message, state: FSMContext):
         except Exception:
             pass
 
-    # Разбор JSON второй модели
+    # --------- Разбор JSON второй модели с валидацией ---------
+    interior_json_valid = False
     summary_ru = ""
     styles_profile: Dict[str, Any] = {}
     recommended_colors_json: List[Dict[str, Any]] = []
     door_colors_json: List[Dict[str, Any]] = []
 
-    if isinstance(json_data, dict):
-        summary = json_data.get("summary", {}) or {}
-        summary_ru = summary.get("interior_description", "") or ""
-        door_colors_json = summary.get("door_colors", []) or []
-        styles_profile = json_data.get("styles", {}) or {}
-        recommended_colors_json = json_data.get("recommended_colors", []) or []
+    if json_data is not None:
+        interior_json_valid, summary_ru, styles_profile, recommended_colors_json, door_colors_json = (
+            extract_interior_profile(json_data)
+        )
 
-    # 1) Показываем клиенту ТОЛЬКО русское краткое описание из JSON.
-    # Если его нет — фоллбек на english_desc
-    to_show = summary_ru.strip() or english_desc.strip()
-    if to_show:
-        for chunk in textwrap.wrap(to_show, 3500, replace_whitespace=False, drop_whitespace=False):
-            await m.answer(truncate(chunk), parse_mode=None)
+    # 1) Что показываем пользователю:
+    #    - если JSON валиден → краткое RU-описание
+    #    - если JSON битый → НИЧЕГО не показываем (даже english_desc)
+    if interior_json_valid:
+        to_show = summary_ru.strip()
+        if to_show:
+            for chunk in textwrap.wrap(
+                to_show, 3500, replace_whitespace=False, drop_whitespace=False
+            ):
+                await m.answer(truncate(chunk), parse_mode=None)
 
-    # 2) Считаем порядок дверей по стилям
-    door_order = compute_door_order(styles_profile)
+    # 2) Порядок дверей:
+    #    - если JSON валиден → сортируем по стилям
+    #    - если нет → не записываем door_order, карусель покажет CATALOG как есть
+    door_order = compute_door_order(styles_profile) if interior_json_valid else None
 
     # 3) Сохраняем всё нужное в state
-    await state.update_data(
-        interior_path=str(img_path),
-        interior_description_en=english_desc,
-        styles_profile=styles_profile,
-        summary_ru=summary_ru,
-        recommended_colors_json=recommended_colors_json,
-        door_colors_json=door_colors_json,
-        door_order=door_order,
-        carousel_idx=0,
-    )
+    payload: Dict[str, Any] = {
+        "interior_path": str(img_path),
+        "interior_description_en": english_desc,  # для генерации картинки
+        "styles_profile": styles_profile if interior_json_valid else {},
+        "summary_ru": summary_ru if interior_json_valid else "",
+        "recommended_colors_json": recommended_colors_json if interior_json_valid else [],
+        "door_colors_json": door_colors_json if interior_json_valid else [],
+        "carousel_idx": 0,
+        "interior_json_valid": interior_json_valid,
+    }
+    if door_order is not None:
+        payload["door_order"] = door_order
 
-    # 4) Карусель по отсортированным дверям
+    await state.update_data(**payload)
+
+    # 4) Карусель дверей:
+    #    - если есть door_order → по стилям
+    #    - если нет → в дефолтном порядке CATALOG
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 
 
@@ -1524,25 +1634,57 @@ async def carousel_nav(cb: CallbackQuery, state: FSMContext):
         await show_or_update_carousel(cb, state, idx)
         await cb.answer()
         return
+
     elif action == "next":
         idx = (idx + 1) % len(door_order)
         await show_or_update_carousel(cb, state, idx)
         await cb.answer()
         return
+
     elif action == "choose":
         # текущая дверь по стилевому порядку
         door_global_idx = door_order[idx]
         door = CATALOG[door_global_idx]
         await state.update_data(door_id=str(door["id"]))
 
-        # --- здесь будет НОВАЯ логика выбора цветов из JSON (см. блок 5) ---
         data = await state.get_data()
+        json_ok = data.get("interior_json_valid", False)
+
+        if not json_ok:
+            # --- Fallback: JSON битый/невалидный ---
+            # Используем только дефолтные цвета из каталога, без сообщения "Рекомендуемые цвета двери..."
+            colors_catalog = door.get("colors") or []
+            merged: List[Dict[str, str]] = []
+
+            if colors_catalog:
+                merged.extend(colors_catalog)
+
+            if not merged:
+                defaults = door.get("default_colors", []) or ["#FFFFFF", "#F3F0E6", "#1E1E1E"]
+                for hx in defaults:
+                    merged.append({"ral": hx, "name": hx, "reason_ru": ""})
+
+            kb, _descr = build_colors_keyboard_and_text(merged)
+            await state.update_data(available_colors=merged)
+
+            await send_step_message(
+                cb,
+                state,
+                f"Модель: <b>{door['name']}</b>\n\n"
+                "Выберите цвет полотна и рамки (фурнитура НЕ перекрашивается):",
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+            await state.set_state(Flow.selecting_color)
+            await cb.answer()
+            return
+
+        # --- JSON валиден: используем рекомендованные цвета и описания ---
         rec_colors = data.get("recommended_colors_json") or []
         door_colors_info = data.get("door_colors_json") or []
 
-        # маппинг recommended_colors + why по RAL
         enriched: List[Dict[str, str]] = []
-        reasons_by_ral = {}
+        reasons_by_ral: Dict[str, str] = {}
         for d in door_colors_info:
             ral = str(d.get("ral", "")).strip().upper()
             if ral:
@@ -1565,7 +1707,7 @@ async def carousel_nav(cb: CallbackQuery, state: FSMContext):
                 }
             )
 
-        # если JSON пустой — fallback на дефолтные цвета двери
+        # если по какой-то причине список пустой даже при json_ok — fallback на дефолтные
         if not enriched:
             defaults = door.get("default_colors", []) or ["#FFFFFF", "#F3F0E6", "#1E1E1E"]
             for hx in defaults:
@@ -1574,13 +1716,12 @@ async def carousel_nav(cb: CallbackQuery, state: FSMContext):
         kb, descr = build_colors_keyboard_and_text(enriched)
         await state.update_data(available_colors=enriched)
 
-        # 1) ОТДЕЛЬНОЕ сообщение с описанием цветов (НЕ step, не удаляется)
+        # Отдельное сообщение с описанием рекомендованных цветов
         if descr:
             await cb.message.answer(
                 "Рекомендуемые цвета двери для этого интерьера:\n\n" + descr
             )
 
-        # 2) Шаговое сообщение с выбором цвета (будет исчезать при переходах)
         await send_step_message(
             cb,
             state,
@@ -1591,8 +1732,10 @@ async def carousel_nav(cb: CallbackQuery, state: FSMContext):
         )
         await state.set_state(Flow.selecting_color)
         await cb.answer()
+
     else:
         await cb.answer()
+
 
 
 @router.callback_query(Flow.selecting_color, F.data.startswith("color_idx:"))
