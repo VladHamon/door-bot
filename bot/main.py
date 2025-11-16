@@ -257,6 +257,207 @@ def _resp_image_bytes(resp) -> bytes:
             return data
     raise RuntimeError("Gemini did not return an image payload")
 
+# =========================== INTERIOR JSON ANALYSIS (Gemini 2.5 Flash) ===========================
+INTERIOR_JSON_PROMPT = textwrap.dedent("""
+You are a professional interior designer and door color specialist.
+
+Your task is to analyze the interior and return a STRICTLY valid JSON containing three parts:
+
+a short interior description + suitable door colors (with RAL codes),
+
+a table of styles with probabilities,
+
+and a list of recommended colors for interface buttons.
+Write EVERYTHING in RUSSIAN.
+
+Choose door colors only from real existing RAL colors (e.g., RAL 9016, RAL 9003, RAL 7047, RAL 7021, etc.).
+
+Do NOT invent non-existent RAL codes.
+JSON structure:
+
+
+{
+  "summary": {
+    "interior_description": "short interior description, 2–4 sentences",
+    "door_colors": [
+      {
+        "ral": "RAL 9016",
+        "name": "Белый трафик",
+        "why": "Short explanation of why this color matches the interior."
+      }
+    ]
+  },
+  "styles": {
+    "Minimalism": 0,
+    "Contemporary": 0,
+    "Loft (Industrial)": 0,
+    "Scandinavian": 0,
+    "High-Tech": 0,
+    "Eco Style": 0,
+    "Mid-Century Modern": 0,
+    "Japandi": 0,
+    "Boho": 0,
+    "Fusion": 0,
+    "Eclectic": 0,
+    "Maximalism": 0,
+    "Wabi-Sabi": 0,
+    "Hygge": 0,
+    "Rustic (incl. Modern Rustic)": 0,
+    "Farmhouse (Modern Country)": 0,
+    "Grunge": 0,
+    "Pop Art": 0,
+    "Brutalism": 0,
+    "Postmodernism": 0,
+    "Memphis": 0,
+    "Shabby Chic": 0,
+    "Vintage": 0,
+    "Retro": 0,
+    "Bionic (Organic Tech)": 0,
+    "Techno": 0,
+    "Futurism": 0,
+    "Steampunk": 0,
+    "Kitsch": 0,
+    "Lounge": 0,
+    "Military": 0,
+    "Bauhaus": 0,
+    "Constructivism": 0,
+    "Functionalism": 0,
+    "De Stijl": 0
+  },
+  "recommended_colors": [
+    {
+      "ral": "RAL 9016",
+      "name": "Белый трафик",
+      "label": "RAL 9016 — Белый трафик"
+    }
+  ]
+}
+Rules:
+
+summary.interior_description
+Provide a short description of the interior: room type, atmosphere, materials, color palette.
+summary.door_colors
+List 2–5 best matching door colors.
+For EACH:
+"ral" — real RAL code
+"name" — short Russian name of the color
+"why" — one-sentence justification
+styles
+MUST include ALL of these styles (exact strings in English):
+Minimalism
+Contemporary
+Loft (Industrial)
+Scandinavian
+High-Tech
+Eco Style
+Mid-Century Modern
+Japandi
+Boho
+Fusion
+Eclectic
+Maximalism
+Wabi-Sabi
+Hygge
+Rustic (incl. Modern Rustic)
+Farmhouse (Modern Country)
+Grunge
+Pop Art
+Brutalism
+Postmodernism
+Memphis
+Shabby Chic
+Vintage
+Retro
+Bionic (Organic Tech)
+Techno
+Futurism
+Steampunk
+Kitsch
+Lounge
+Military
+Bauhaus
+Constructivism
+Functionalism
+De Stijl
+For each style output an integer probability (0–100).
+They do not need to sum to 100.
+recommended_colors
+Provide 2–5 recommended color options for use as UI buttons.
+For each:
+"ral" — RAL code
+"name" — short Russian color name
+"label" — readable label like "RAL 9016 — Белый трафик"
+Do NOT add any extra text, comments, or fields.
+Return ONLY the JSON, with no explanations before or after.
+""").strip()
+
+
+def _parse_interior_json(txt: str) -> Optional[dict]:
+    txt = txt.strip()
+    if not txt:
+        return None
+    # пробуем как есть
+    try:
+        return json.loads(txt)
+    except Exception:
+        pass
+    # fallback — ищем JSON-блок внутри
+    j = extract_json_block(txt)
+    return j
+
+
+async def analyze_scene_json_from_image(image_path: Path) -> Optional[dict]:
+    """JSON-анализ интерьера по фото."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    img = Image.open(image_path).convert("RGB")
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[INTERIOR_JSON_PROMPT, img],
+        config=types.GenerateContentConfig(temperature=0.2),
+    )
+    txt = _resp_text(resp).strip()
+    return _parse_interior_json(txt)
+
+
+async def analyze_scene_json_from_text_and_palette(
+    description_text: str,
+    palette_image_path: Optional[Path],
+) -> Optional[dict]:
+    """JSON-анализ интерьера по тексту и, опционально, палитре."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    contents: List[Any] = [INTERIOR_JSON_PROMPT, description_text.strip()]
+    if palette_image_path is not None and palette_image_path.exists():
+        img = Image.open(palette_image_path).convert("RGB")
+        contents.append(img)
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contents,
+        config=types.GenerateContentConfig(temperature=0.2),
+    )
+    txt = _resp_text(resp).strip()
+    return _parse_interior_json(txt)
+
+
+async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
+    """JSON-анализ интерьера по выбранному стилю (без фото)."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    contents = [
+        INTERIOR_JSON_PROMPT,
+        f"Интерьер в стиле: {style_prompt}",
+    ]
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contents,
+        config=types.GenerateContentConfig(temperature=0.2),
+    )
+    txt = _resp_text(resp).strip()
+    return _parse_interior_json(txt)
+
+
 # =========================== 1) ОПИСАНИЕ СЦЕНЫ (Gemini 2.5 Pro) ===========================
 async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[str, str]]]:
     """
@@ -535,6 +736,79 @@ def should_apply_watermark(user: Optional[User]) -> bool:
 
     return True
 
+STYLE_KEYS = [
+    "Minimalism",
+    "Contemporary",
+    "Loft (Industrial)",
+    "Scandinavian",
+    "High-Tech",
+    "Eco Style",
+    "Mid-Century Modern",
+    "Japandi",
+    "Boho",
+    "Fusion",
+    "Eclectic",
+    "Maximalism",
+    "Wabi-Sabi",
+    "Hygge",
+    "Rustic (incl. Modern Rustic)",
+    "Farmhouse (Modern Country)",
+    "Grunge",
+    "Pop Art",
+    "Brutalism",
+    "Postmodernism",
+    "Memphis",
+    "Shabby Chic",
+    "Vintage",
+    "Retro",
+    "Bionic (Organic Tech)",
+    "Techno",
+    "Futurism",
+    "Steampunk",
+    "Kitsch",
+    "Lounge",
+    "Military",
+    "Bauhaus",
+    "Constructivism",
+    "Functionalism",
+    "De Stijl",
+]
+
+
+def compute_door_order(styles_profile: Dict[str, Any]) -> List[int]:
+    """
+    Считаем суммарную дельту |p_int - p_door| по всем стилям.
+    Чем МЕНЬШЕ сумма, тем лучше дверь подходит.
+    Возвращаем список ИНДЕКСОВ дверей в CATALOG в порядке возрастания этой суммы.
+    """
+    if not styles_profile:
+        return list(range(len(CATALOG)))
+
+    orders: List[Tuple[int, float]] = []
+
+    for idx, door in enumerate(CATALOG):
+        total_delta = 0.0
+        for style in STYLE_KEYS:
+            p_int = styles_profile.get(style, 0)
+            try:
+                p_int = float(p_int)
+            except Exception:
+                p_int = 0.0
+
+            p_door = door.get(style, 0)
+            try:
+                p_door = float(p_door)
+            except Exception:
+                p_door = 0.0
+
+            total_delta += abs(p_int - p_door)
+
+        orders.append((idx, total_delta))
+
+    orders.sort(key=lambda x: x[1])
+    return [i for (i, _) in orders]
+
+
 
 
 
@@ -645,13 +919,21 @@ def door_caption(door: Dict[str, Any], idx: int) -> str:
 async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
     """
     Показываем/обновляем карусель с фото двери и кнопками.
-    При этом:
-    - удаляем предыдущее служебное сообщение шага (если было);
-    - запоминаем id сообщения с каруселью.
+    Используем порядок дверей из state['door_order'], если он есть.
     """
-    idx = max(0, min(idx, len(CATALOG) - 1))
+    data = await state.get_data()
+    door_order: List[int] = data.get("door_order") or list(range(len(CATALOG)))
+
+    if not door_order:
+        door_order = list(range(len(CATALOG)))
+
+    # idx – позиция в door_order
+    idx = max(0, min(idx, len(door_order) - 1))
     await state.update_data(carousel_idx=idx)
-    door = CATALOG[idx]
+
+    door_global_idx = door_order[idx]
+    door = CATALOG[door_global_idx]
+
     img_path = Path(door["image_png"])
     caption = door_caption(door, idx)
     kb = build_carousel_keyboard(idx)
@@ -663,7 +945,6 @@ async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
         chat_id = cb_or_msg.chat.id
 
     # Удаляем предыдущее шаговое сообщение (если было)
-    data = await state.get_data()
     last_id = data.get("last_bot_message_id")
     if last_id:
         try:
@@ -699,6 +980,7 @@ async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
 
     if sent_msg is not None:
         await state.update_data(last_bot_message_id=sent_msg.message_id)
+
 
 
 # =========================== TELEGRAM BOT FLOW ===========================
@@ -967,17 +1249,28 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
 
     await state.set_state(Flow.describing)
     await send_step_message(
-       m,
-       state,
-       "⏳ Пожалуйста, ожидайте: создаём интерьер по вашему описанию и палитре…",
-   )
-
+        m,
+        state,
+        "⏳ Пожалуйста, ожидайте: создаём интерьер по вашему описанию и палитре…",
+    )
 
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
 
+    english_desc = ""
+    rec_colors_1: List[Dict[str, str]] = []
+    json_data: Optional[dict] = None
+
     try:
-        english_desc, recommended_colors = await describe_scene_from_text_and_palette(desc, palette_path)
+        task_desc = asyncio.create_task(
+            describe_scene_from_text_and_palette(desc, palette_path)
+        )
+        task_json = asyncio.create_task(
+            analyze_scene_json_from_text_and_palette(desc, palette_path)
+        )
+
+        english_desc, rec_colors_1 = await task_desc
+        json_data = await task_json
     finally:
         typing_stop.set()
         try:
@@ -985,20 +1278,40 @@ async def run_text_palette_pipeline(m: Message, state: FSMContext):
         except Exception:
             pass
 
-    if english_desc:
-        for chunk in textwrap.wrap(english_desc, 3500, replace_whitespace=False, drop_whitespace=False):
+    summary_ru = ""
+    styles_profile: Dict[str, Any] = {}
+    recommended_colors_json: List[Dict[str, Any]] = []
+    door_colors_json: List[Dict[str, Any]] = []
+
+    if isinstance(json_data, dict):
+        summary = json_data.get("summary", {}) or {}
+        summary_ru = summary.get("interior_description", "") or ""
+        door_colors_json = summary.get("door_colors", []) or []
+        styles_profile = json_data.get("styles", {}) or {}
+        recommended_colors_json = json_data.get("recommended_colors", []) or []
+
+    to_show = summary_ru.strip() or english_desc.strip()
+    if to_show:
+        for chunk in textwrap.wrap(to_show, 3500, replace_whitespace=False, drop_whitespace=False):
             await m.answer(truncate(chunk), parse_mode=None)
+
+    door_order = compute_door_order(styles_profile)
 
     await state.update_data(
         interior_description_en=english_desc,
-        recommended_colors=recommended_colors,
+        styles_profile=styles_profile,
+        summary_ru=summary_ru,
+        recommended_colors_json=recommended_colors_json,
+        door_colors_json=door_colors_json,
         interior_path=str(palette_path),
         tp_description=None,
         tp_palette_path=None,
+        door_order=door_order,
     )
-    
+
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 
 @router.callback_query(Flow.selecting_style, F.data.startswith("style:"))
@@ -1009,10 +1322,9 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         await cb.answer("Стиль не найден", show_alert=True)
         return
 
-    # ОТВЕЧАЕМ на callback СРАЗУ, пока ещё ничего тяжёлого не делали
     await cb.answer()
     _, label_ru, style_prompt = style_entry
-    
+
     await state.set_state(Flow.describing)
     await send_step_message(
         cb,
@@ -1020,12 +1332,23 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         f"⏳ Создаём интерьер в стиле «{label_ru}»…",
     )
 
-
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(run_chat_action(cb.message.chat.id, ChatAction.TYPING, typing_stop))
 
+    english_desc = ""
+    rec_colors_1: List[Dict[str, str]] = []
+    json_data: Optional[dict] = None
+
     try:
-        english_desc, recommended_colors = await describe_scene_from_style(style_prompt)
+        task_desc = asyncio.create_task(
+            describe_scene_from_style(style_prompt)
+        )
+        task_json = asyncio.create_task(
+            analyze_scene_json_from_style(style_prompt)
+        )
+
+        english_desc, rec_colors_1 = await task_desc
+        json_data = await task_json
     finally:
         typing_stop.set()
         try:
@@ -1033,15 +1356,34 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    if english_desc:
-        for chunk in textwrap.wrap(english_desc, 3500, replace_whitespace=False, drop_whitespace=False):
+    summary_ru = ""
+    styles_profile: Dict[str, Any] = {}
+    recommended_colors_json: List[Dict[str, Any]] = []
+    door_colors_json: List[Dict[str, Any]] = []
+
+    if isinstance(json_data, dict):
+        summary = json_data.get("summary", {}) or {}
+        summary_ru = summary.get("interior_description", "") or ""
+        door_colors_json = summary.get("door_colors", []) or []
+        styles_profile = json_data.get("styles", {}) or {}
+        recommended_colors_json = json_data.get("recommended_colors", []) or []
+
+    to_show = summary_ru.strip() or english_desc.strip()
+    if to_show:
+        for chunk in textwrap.wrap(to_show, 3500, replace_whitespace=False, drop_whitespace=False):
             await cb.message.answer(truncate(chunk), parse_mode=None)
+
+    door_order = compute_door_order(styles_profile)
 
     await state.update_data(
         interior_description_en=english_desc,
-        recommended_colors=recommended_colors,
+        styles_profile=styles_profile,
+        summary_ru=summary_ru,
+        recommended_colors_json=recommended_colors_json,
+        door_colors_json=door_colors_json,
+        door_order=door_order,
     )
-    
+
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(cb.message, state, idx=0)
 
@@ -1052,6 +1394,7 @@ async def style_selected(cb: CallbackQuery, state: FSMContext):
 async def got_photo(m: Message, state: FSMContext):
     if not await ensure_subscribed(m.from_user.id):
         return
+
     workdir = Path("work") / str(m.from_user.id) / str(uuid.uuid4())
     img_path = workdir / "interior.jpg"
     await tg_download_photo(m, img_path)
@@ -1066,8 +1409,17 @@ async def got_photo(m: Message, state: FSMContext):
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(run_chat_action(m.chat.id, ChatAction.TYPING, typing_stop))
 
+    english_desc = ""
+    rec_colors_1: List[Dict[str, str]] = []
+    json_data: Optional[dict] = None
+
     try:
-        english_desc, recommended_colors = await describe_scene_with_gemini(img_path)
+        # ДВА запроса параллельно
+        task_desc = asyncio.create_task(describe_scene_with_gemini(img_path))
+        task_json = asyncio.create_task(analyze_scene_json_from_image(img_path))
+
+        english_desc, rec_colors_1 = await task_desc
+        json_data = await task_json
     finally:
         typing_stop.set()
         try:
@@ -1075,64 +1427,133 @@ async def got_photo(m: Message, state: FSMContext):
         except Exception:
             pass
 
-    # Покажем описание (можно разнести на несколько сообщений, если очень длинное)
-    if english_desc:
-        for chunk in textwrap.wrap(english_desc, 3500, replace_whitespace=False, drop_whitespace=False):
+    # Разбор JSON второй модели
+    summary_ru = ""
+    styles_profile: Dict[str, Any] = {}
+    recommended_colors_json: List[Dict[str, Any]] = []
+    door_colors_json: List[Dict[str, Any]] = []
+
+    if isinstance(json_data, dict):
+        summary = json_data.get("summary", {}) or {}
+        summary_ru = summary.get("interior_description", "") or ""
+        door_colors_json = summary.get("door_colors", []) or []
+        styles_profile = json_data.get("styles", {}) or {}
+        recommended_colors_json = json_data.get("recommended_colors", []) or []
+
+    # 1) Показываем клиенту ТОЛЬКО русское краткое описание из JSON.
+    # Если его нет — фоллбек на english_desc
+    to_show = summary_ru.strip() or english_desc.strip()
+    if to_show:
+        for chunk in textwrap.wrap(to_show, 3500, replace_whitespace=False, drop_whitespace=False):
             await m.answer(truncate(chunk), parse_mode=None)
 
+    # 2) Считаем порядок дверей по стилям
+    door_order = compute_door_order(styles_profile)
+
+    # 3) Сохраняем всё нужное в state
     await state.update_data(
         interior_path=str(img_path),
         interior_description_en=english_desc,
-        recommended_colors=recommended_colors,
-        carousel_idx=0
+        styles_profile=styles_profile,
+        summary_ru=summary_ru,
+        recommended_colors_json=recommended_colors_json,
+        door_colors_json=door_colors_json,
+        door_order=door_order,
+        carousel_idx=0,
     )
-    
+
+    # 4) Карусель по отсортированным дверям
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
 
 
 @router.callback_query(Flow.selecting_door, F.data.startswith("carousel:"))
 async def carousel_nav(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    door_order: List[int] = data.get("door_order") or list(range(len(CATALOG)))
+
+    if not door_order:
+        door_order = list(range(len(CATALOG)))
+
     idx = current_catalog_index(data)
     action = cb.data.split(":")[1]
+
     if action == "prev":
-        idx = (idx - 1) % len(CATALOG)
+        idx = (idx - 1) % len(door_order)
         await show_or_update_carousel(cb, state, idx)
+        await cb.answer()
+        return
     elif action == "next":
-        idx = (idx + 1) % len(CATALOG)
+        idx = (idx + 1) % len(door_order)
         await show_or_update_carousel(cb, state, idx)
+        await cb.answer()
+        return
     elif action == "choose":
-        # Зафиксировать текущую дверь
-        door = CATALOG[idx]
+        # текущая дверь по стилевому порядку
+        door_global_idx = door_order[idx]
+        door = CATALOG[door_global_idx]
         await state.update_data(door_id=str(door["id"]))
-        # Подготовим список цветов: приоритет — из каталога, затем из Gemini, затем default_colors
-        colors_catalog = door.get("colors") or []
+
+        # --- здесь будет НОВАЯ логика выбора цветов из JSON (см. блок 5) ---
         data = await state.get_data()
-        colors_gemini = data.get("recommended_colors") or []
-        merged: List[Dict[str, str]] = []
-        if colors_catalog:
-            merged.extend(colors_catalog)
-        if colors_gemini:
-            merged.extend([c for c in colors_gemini if c not in merged])
-        # Если совсем пусто — fallback на default_colors
-        if not merged:
-            defaults = door.get("default_colors", []) or ["#FFFFFF", "#F3F0E6", "#D9D9D9", "#6B6B6B", "#2F5A3C", "#8B6A4E"]
+        rec_colors = data.get("recommended_colors_json") or []
+        door_colors_info = data.get("door_colors_json") or []
+
+        # маппинг recommended_colors + why по RAL
+        enriched: List[Dict[str, str]] = []
+        reasons_by_ral = {}
+        for d in door_colors_info:
+            ral = str(d.get("ral", "")).strip().upper()
+            if ral:
+                reasons_by_ral[ral] = d.get("why", "").strip()
+
+        for rc in rec_colors[:5]:
+            ral = str(rc.get("ral", "")).strip()
+            label = (rc.get("label") or "").strip()
+            name = (rc.get("name") or "").strip()
+
+            ral_norm = ral.upper()
+            reason = reasons_by_ral.get(ral_norm, "")
+            display_name = label or (f"{ral} — {name}" if ral and name else (ral or name or "Цвет"))
+
+            enriched.append(
+                {
+                    "ral": ral,
+                    "name": display_name,
+                    "reason_ru": reason,
+                }
+            )
+
+        # если JSON пустой — fallback на дефолтные цвета двери
+        if not enriched:
+            defaults = door.get("default_colors", []) or ["#FFFFFF", "#F3F0E6", "#1E1E1E"]
             for hx in defaults:
-                merged.append({"hex": hx, "name": hx})
-        kb, descr = build_colors_keyboard_and_text(merged)
-        await state.update_data(available_colors=merged)
+                enriched.append({"ral": hx, "name": hx, "reason_ru": ""})
+
+        kb, descr = build_colors_keyboard_and_text(enriched)
+        await state.update_data(available_colors=enriched)
+
+        # 1) ОТДЕЛЬНОЕ сообщение с описанием цветов (НЕ step, не удаляется)
+        if descr:
+            await cb.message.answer(
+                "Рекомендуемые цвета двери для этого интерьера:\n\n" + descr
+            )
+
+        # 2) Шаговое сообщение с выбором цвета (будет исчезать при переходах)
         await send_step_message(
             cb,
             state,
-            f"Модель: <b>{door['name']}</b>\n\n{descr}\n\nВыберите цвет полотна и рамки (фурнитура НЕ перекрашивается):",
+            f"Модель: <b>{door['name']}</b>\n\n"
+            "Выберите цвет полотна и рамки (фурнитура НЕ перекрашивается):",
             reply_markup=kb,
             parse_mode="HTML",
         )
-        await cb.answer()
         await state.set_state(Flow.selecting_color)
+        await cb.answer()
     else:
         await cb.answer()
+
 
 @router.callback_query(Flow.selecting_color, F.data.startswith("color_idx:"))
 async def chose_color_from_list(cb: CallbackQuery, state: FSMContext):
