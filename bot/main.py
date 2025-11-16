@@ -1180,11 +1180,7 @@ async def mode_text_palette(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.waiting_text_palette)
     await cb.answer()
 
-@router.message(F.sticker)
-async def debug_sticker(m: Message):
-    if m.sticker:
-        print("STICKER FILE_ID:", m.sticker.file_id)
-        await m.answer("Стикер получен, file_id в логах 😉")
+
 
 
 
