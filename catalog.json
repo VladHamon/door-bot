@@ -48,8 +48,8 @@
     "materials": "Эмаль",
     "image_png": "assets/doors/kyoto.png",
     "default_colors": ["#E5D3B3", "#B28A5A", "#2D2D2D"],
-    "tags": ["japandi", "slatted"]
-     "Minimalism": 10,
+    "tags": ["japandi", "slatted"],
+    "Minimalism": 10,
     "Contemporary": 75,
     "Loft (Industrial)": 0,
     "Scandinavian": 30,
