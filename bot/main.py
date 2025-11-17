@@ -1158,8 +1158,10 @@ def palette_caption(palette: Dict[str, Any], idx: int) -> str:
     total = len(PALETTES)
     return (
         f"<b>{palette.get('name', 'Палитра')}</b>\n"
-        f"Палитра {idx+1} из {total}"
+        f"Палитра {idx+1} из {total}\n\n"
+        "Листайте ◀ ▶ и нажмите «✅ Выбрать», чтобы использовать эту палитру."
     )
+
 
 
 def build_palette_carousel_keyboard(idx: int) -> InlineKeyboardMarkup:
@@ -1362,22 +1364,21 @@ async def tp_own_palette(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(Flow.waiting_text_palette, F.data == "tp:gallery")
 async def tp_gallery(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.selecting_palette)
-    await cb.message.answer("Выберите палитру из галереи:")
+    # отдельное текстовое сообщение не нужно, сразу показываем карусель
     await show_or_update_palette_carousel(cb.message, state, idx=0)
     await cb.answer()
+
 
 
 
 @router.callback_query(Flow.choosing_mode, F.data == "mode:style")
 async def mode_style(cb: CallbackQuery, state: FSMContext):
     await state.update_data(entry_mode="style")
-    await cb.message.answer(
-        "Выберите интерьер из галереи, по которому мы создадим описание комнаты. "
-        "Дальше вы сможете выбрать дверь и цвет."
-    )
     await state.set_state(Flow.selecting_style)
+    # сразу показываем карусель, без отдельного текстового сообщения
     await show_or_update_style_carousel(cb.message, state, idx=0)
     await cb.answer()
+
 
 
 
@@ -1446,7 +1447,6 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
             await send_step_message(cb, state, text, reply_markup=BACK_INLINE_KB, parse_mode="HTML")
         elif entry_mode == "style":
             await state.set_state(Flow.selecting_style)
-            await cb.message.answer("Выберите интерьер из галереи стилей:")
             await show_or_update_style_carousel(cb.message, state, idx=0)
         else:
             await send_mode_menu(cb.message, state)
@@ -1918,8 +1918,10 @@ def style_caption(style_item: Dict[str, Any], idx: int) -> str:
     total = len(STYLE_GALLERY)
     return (
         f"<b>{style_item.get('name', 'Интерьер')}</b>\n"
-        f"Вариант {idx+1} из {total}"
+        f"Вариант {idx+1} из {total}\n\n"
+        "Листайте ◀ ▶ и нажмите «✅ Выбрать», чтобы работать с этим интерьером."
     )
+
 
 
 def build_style_carousel_keyboard(idx: int) -> InlineKeyboardMarkup:
