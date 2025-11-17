@@ -57,6 +57,12 @@ dp.include_router(router)
 
 CATALOG = json.loads(Path("catalog.json").read_text(encoding="utf-8"))
 
+CATALOG = json.loads(Path("catalog.json").read_text(encoding="utf-8"))
+
+PALETTES = json.loads(Path("palettes.json").read_text(encoding="utf-8"))
+STYLE_GALLERY = json.loads(Path("style_gallery.json").read_text(encoding="utf-8"))
+
+
 STYLE_OPTIONS: List[Tuple[str, str, str]] = [
     ("scandi", "Скандинавский", "Scandinavian interior"),
     ("japandi", "Japandi", "Japandi interior"),
@@ -76,6 +82,7 @@ class Flow(StatesGroup):
     choosing_mode = State()
     waiting_foto = State()
     waiting_text_palette = State()
+    selecting_palette = State()      # ← ДОБАВИТЬ ЭТО
     selecting_style = State()
     describing = State()
     selecting_door = State()
@@ -1048,6 +1055,16 @@ def build_styles_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def build_text_palette_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📷 Прикрепить свою палитру", callback_data="tp:own_palette")],
+            [InlineKeyboardButton(text="🎨 Выбрать палитру из галереи", callback_data="tp:gallery")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
+        ]
+    )
+
+
 
 
 def current_catalog_index(state_data: Dict[str, Any]) -> int:
@@ -1135,6 +1152,87 @@ async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
 
     if sent_msg is not None:
         await state.update_data(last_bot_message_id=sent_msg.message_id)
+
+
+def palette_caption(palette: Dict[str, Any], idx: int) -> str:
+    total = len(PALETTES)
+    return (
+        f"<b>{palette.get('name', 'Палитра')}</b>\n"
+        f"Палитра {idx+1} из {total}"
+    )
+
+
+def build_palette_carousel_keyboard(idx: int) -> InlineKeyboardMarkup:
+    nav = [
+        InlineKeyboardButton(text="◀", callback_data="palette:prev"),
+        InlineKeyboardButton(text="✅ Выбрать", callback_data="palette:choose"),
+        InlineKeyboardButton(text="▶", callback_data="palette:next"),
+    ]
+    back_row = [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+    return InlineKeyboardMarkup(inline_keyboard=[nav, back_row])
+
+
+async def show_or_update_palette_carousel(cb_or_msg, state: FSMContext, idx: int):
+    """
+    Карусель палитр (PALETTES).
+    """
+    total = len(PALETTES)
+    if total == 0:
+        if isinstance(cb_or_msg, CallbackQuery):
+            await cb_or_msg.message.answer("Галерея палитр пока пуста.")
+        else:
+            await cb_or_msg.answer("Галерея палитр пока пуста.")
+        return
+
+    idx = max(0, min(idx, total - 1))
+    await state.update_data(palette_idx=idx)
+
+    palette = PALETTES[idx]
+    img_path = Path(palette["image"])
+    caption = palette_caption(palette, idx)
+    kb = build_palette_carousel_keyboard(idx)
+
+    if isinstance(cb_or_msg, CallbackQuery):
+        msg = cb_or_msg.message
+    else:
+        msg = cb_or_msg
+
+    data = await state.get_data()
+    last_id = data.get("last_bot_message_id")
+    if last_id:
+        try:
+            await bot.delete_message(chat_id=msg.chat.id, message_id=last_id)
+        except Exception:
+            pass
+
+    sent_msg = None
+    try:
+        media = InputMediaPhoto(
+            media=FSInputFile(str(img_path)),
+            caption=caption,
+            parse_mode="HTML",
+        )
+        if isinstance(cb_or_msg, CallbackQuery):
+            await msg.edit_media(media=media, reply_markup=kb)
+            sent_msg = msg
+        else:
+            sent_msg = await msg.answer_photo(
+                photo=FSInputFile(str(img_path)),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+    except Exception:
+        sent_msg = await msg.answer_photo(
+            photo=FSInputFile(str(img_path)),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+
+    if sent_msg is not None:
+        await state.update_data(last_bot_message_id=sent_msg.message_id)
+
 
 
 
@@ -1238,34 +1336,49 @@ async def mode_photo(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(Flow.choosing_mode, F.data == "mode:text_palette")
 async def mode_text_palette(cb: CallbackQuery, state: FSMContext):
     text = (
-        "Опишите, пожалуйста, ваш интерьер словами и приложите <b>палитру</b> цветов:\n\n"
-        "• Можно отправить одно сообщение с картинкой палитры и описанием в подписи.\n"
-        "• Либо сначала текст, потом отдельным сообщением — скрин/фото палитры.\n\n"
-        "Как только у нас будет и текст, и палитра, мы создадим детальное описание интерьера на их основе."
+        "Опишите, пожалуйста, ваш интерьер словами и выберите, как задать <b>палитру</b> цветов:\n\n"
+        "• 📷 Прикрепить свою палитру (скрин/фото);\n"
+        "• 🎨 Выбрать палитру из нашей галереи.\n\n"
+        "Сначала отправьте текстовое описание, затем палитру (или наоборот)."
     )
-    await send_step_message(cb, state, text, reply_markup=BACK_INLINE_KB, parse_mode="HTML")
+    await send_step_message(cb, state, text, reply_markup=build_text_palette_keyboard(), parse_mode="HTML")
     await state.update_data(tp_description=None, tp_palette_path=None, entry_mode="text_palette")
     await state.set_state(Flow.waiting_text_palette)
     await cb.answer()
 
+@router.callback_query(Flow.waiting_text_palette, F.data == "tp:own_palette")
+async def tp_own_palette(cb: CallbackQuery, state: FSMContext):
+    # Просто объясняем, что можно прислать свою картинку палитры
+    await send_step_message(
+        cb,
+        state,
+        "Пришлите, пожалуйста, <b>свою палитру</b> отдельно (скрин/фото) и/или текстовое описание интерьера.",
+        reply_markup=BACK_INLINE_KB,
+        parse_mode="HTML",
+    )
+    await cb.answer()
 
 
+@router.callback_query(Flow.waiting_text_palette, F.data == "tp:gallery")
+async def tp_gallery(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Flow.selecting_palette)
+    await cb.message.answer("Выберите палитру из галереи:")
+    await show_or_update_palette_carousel(cb.message, state, idx=0)
+    await cb.answer()
 
 
 
 @router.callback_query(Flow.choosing_mode, F.data == "mode:style")
 async def mode_style(cb: CallbackQuery, state: FSMContext):
     await state.update_data(entry_mode="style")
-    await send_step_message(
-        cb,
-        state,
-        "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
-        "Дальше вы сможете выбрать дверь и цвет.",
-        reply_markup=build_styles_keyboard(),
-        parse_mode=None,
+    await cb.message.answer(
+        "Выберите интерьер из галереи, по которому мы создадим описание комнаты. "
+        "Дальше вы сможете выбрать дверь и цвет."
     )
     await state.set_state(Flow.selecting_style)
+    await show_or_update_style_carousel(cb.message, state, idx=0)
     await cb.answer()
+
 
 
 @router.callback_query(F.data == "back")
@@ -1292,6 +1405,18 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
     elif cur_state == Flow.waiting_text_palette.state:
         await state.update_data(tp_description=None, tp_palette_path=None)
         await send_mode_menu(cb.message, state)
+
+        # 3.5) Выбор палитры из галереи — назад к режиму "текст + палитра"
+    elif cur_state == Flow.selecting_palette.state:
+        await state.set_state(Flow.waiting_text_palette)
+        await send_step_message(
+            cb,
+            state,
+            "Опишите интерьер и выберите: прикрепить свою палитру или выбрать из галереи.",
+            reply_markup=build_text_palette_keyboard(),
+            parse_mode="HTML",
+        )
+
 
     # 4) Выбор стиля — назад к выбору режима
     elif cur_state == Flow.selecting_style.state:
@@ -1321,14 +1446,8 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
             await send_step_message(cb, state, text, reply_markup=BACK_INLINE_KB, parse_mode="HTML")
         elif entry_mode == "style":
             await state.set_state(Flow.selecting_style)
-            await send_step_message(
-                cb,
-                state,
-                "Выберите интерьерный стиль, по которому мы создадим описание комнаты. "
-                "Дальше вы сможете выбрать дверь и цвет.",
-                reply_markup=build_styles_keyboard(),
-                parse_mode=None,
-            )
+            await cb.message.answer("Выберите интерьер из галереи стилей:")
+            await show_or_update_style_carousel(cb.message, state, idx=0)
         else:
             await send_mode_menu(cb.message, state)
 
@@ -1705,6 +1824,252 @@ async def got_photo(m: Message, state: FSMContext):
     #    - если нет → в дефолтном порядке CATALOG
     await state.set_state(Flow.selecting_door)
     await show_or_update_carousel(m, state, idx=0)
+
+
+async def run_style_from_image_pipeline(msg: Message, state: FSMContext, image_path: str, style_item: Dict[str, Any]):
+    """
+    Пайплайн для выбора интерьера из галереи стилей.
+    Строим описание по КАРТИНКЕ, как в got_photo.
+    """
+    img_path = Path(image_path)
+
+    await state.set_state(Flow.describing)
+
+    # 1) Сообщение об ожидании + стикер
+    await show_loading(
+        msg,
+        state,
+        f"⏳ Пожалуйста, ожидайте: анализируем интерьер «{style_item.get('name', 'Интерьер')}»…",
+    )
+
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(
+        run_chat_action(msg.chat.id, ChatAction.TYPING, typing_stop)
+    )
+
+    english_desc = ""
+    rec_colors_1: List[Dict[str, str]] = []
+    json_data: Optional[dict] = None
+
+    try:
+        task_desc = asyncio.create_task(describe_scene_with_gemini(img_path))
+        task_json = asyncio.create_task(analyze_scene_json_from_image(img_path))
+
+        english_desc, rec_colors_1 = await task_desc
+        json_data = await task_json
+
+        if isinstance(json_data, dict):
+            print(
+                "DEBUG_INTERIOR_JSON_STYLE_IMAGE:",
+                json.dumps(json_data, ensure_ascii=False)[:800],
+            )
+        else:
+            print("DEBUG_INTERIOR_JSON_STYLE_IMAGE (non-dict):", json_data)
+    finally:
+        typing_stop.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
+        await clear_loading(msg.chat.id, state)
+
+    interior_json_valid = False
+    summary_ru = ""
+    styles_profile: Dict[str, Any] = {}
+    recommended_colors_json: List[Dict[str, Any]] = []
+    door_colors_json: List[Dict[str, Any]] = []
+
+    if json_data is not None:
+        interior_json_valid, summary_ru, styles_profile, recommended_colors_json, door_colors_json = (
+            extract_interior_profile(json_data)
+        )
+
+    if interior_json_valid:
+        to_show = summary_ru.strip()
+        if to_show:
+            for chunk in textwrap.wrap(
+                to_show, 3500, replace_whitespace=False, drop_whitespace=False
+            ):
+                await msg.answer(truncate(chunk), parse_mode=None)
+
+    door_order = compute_door_order(styles_profile) if interior_json_valid else None
+
+    payload: Dict[str, Any] = {
+        "interior_path": str(img_path),
+        "interior_description_en": english_desc,
+        "styles_profile": styles_profile if interior_json_valid else {},
+        "summary_ru": summary_ru if interior_json_valid else "",
+        "recommended_colors_json": recommended_colors_json if interior_json_valid else [],
+        "door_colors_json": door_colors_json if interior_json_valid else [],
+        "carousel_idx": 0,
+        "interior_json_valid": interior_json_valid,
+        "entry_mode": "style",  # чтобы go_back понимал, что были в режиме стилей
+    }
+    if door_order is not None:
+        payload["door_order"] = door_order
+
+    await state.update_data(**payload)
+
+    await state.set_state(Flow.selecting_door)
+    await show_or_update_carousel(msg, state, idx=0)
+
+
+def style_caption(style_item: Dict[str, Any], idx: int) -> str:
+    total = len(STYLE_GALLERY)
+    return (
+        f"<b>{style_item.get('name', 'Интерьер')}</b>\n"
+        f"Вариант {idx+1} из {total}"
+    )
+
+
+def build_style_carousel_keyboard(idx: int) -> InlineKeyboardMarkup:
+    nav = [
+        InlineKeyboardButton(text="◀", callback_data="stylec:prev"),
+        InlineKeyboardButton(text="✅ Выбрать", callback_data="stylec:choose"),
+        InlineKeyboardButton(text="▶", callback_data="stylec:next"),
+    ]
+    back_row = [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+    return InlineKeyboardMarkup(inline_keyboard=[nav, back_row])
+
+
+async def show_or_update_style_carousel(cb_or_msg, state: FSMContext, idx: int):
+    total = len(STYLE_GALLERY)
+    if total == 0:
+        if isinstance(cb_or_msg, CallbackQuery):
+            await cb_or_msg.message.answer("Галерея интерьеров пока пуста.")
+        else:
+            await cb_or_msg.answer("Галерея интерьеров пока пуста.")
+        return
+
+    idx = max(0, min(idx, total - 1))
+    await state.update_data(style_idx=idx)
+
+    style_item = STYLE_GALLERY[idx]
+    img_path = Path(style_item["image"])
+    caption = style_caption(style_item, idx)
+    kb = build_style_carousel_keyboard(idx)
+
+    if isinstance(cb_or_msg, CallbackQuery):
+        msg = cb_or_msg.message
+    else:
+        msg = cb_or_msg
+
+    data = await state.get_data()
+    last_id = data.get("last_bot_message_id")
+    if last_id:
+        try:
+            await bot.delete_message(chat_id=msg.chat.id, message_id=last_id)
+        except Exception:
+            pass
+
+    sent_msg = None
+    try:
+        media = InputMediaPhoto(
+            media=FSInputFile(str(img_path)),
+            caption=caption,
+            parse_mode="HTML",
+        )
+        if isinstance(cb_or_msg, CallbackQuery):
+            await msg.edit_media(media=media, reply_markup=kb)
+            sent_msg = msg
+        else:
+            sent_msg = await msg.answer_photo(
+                photo=FSInputFile(str(img_path)),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+    except Exception:
+        sent_msg = await msg.answer_photo(
+            photo=FSInputFile(str(img_path)),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+
+    if sent_msg is not None:
+        await state.update_data(last_bot_message_id=sent_msg.message_id)
+
+
+@router.callback_query(Flow.selecting_style, F.data.startswith("stylec:"))
+async def style_carousel_nav(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = int(data.get("style_idx", 0))
+    action = cb.data.split(":", 1)[1]
+
+    total = len(STYLE_GALLERY)
+    if total == 0:
+        await cb.answer("Галерея интерьеров пуста.", show_alert=True)
+        return
+
+    if action == "prev":
+        idx = (idx - 1) % total
+        await show_or_update_style_carousel(cb, state, idx)
+        await cb.answer()
+        return
+    elif action == "next":
+        idx = (idx + 1) % total
+        await show_or_update_style_carousel(cb, state, idx)
+        await cb.answer()
+        return
+    elif action == "choose":
+        style_item = STYLE_GALLERY[idx]
+        style_image_path = style_item["image"]
+        await run_style_from_image_pipeline(cb.message, state, style_image_path, style_item)
+        await cb.answer()
+    else:
+        await cb.answer()
+
+
+
+
+@router.callback_query(Flow.selecting_palette, F.data.startswith("palette:"))
+async def palette_carousel_nav(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = int(data.get("palette_idx", 0))
+    action = cb.data.split(":", 1)[1]
+
+    total = len(PALETTES)
+    if total == 0:
+        await cb.answer("Галерея палитр пуста.", show_alert=True)
+        return
+
+    if action == "prev":
+        idx = (idx - 1) % total
+        await show_or_update_palette_carousel(cb, state, idx)
+        await cb.answer()
+        return
+    elif action == "next":
+        idx = (idx + 1) % total
+        await show_or_update_palette_carousel(cb, state, idx)
+        await cb.answer()
+        return
+    elif action == "choose":
+        palette = PALETTES[idx]
+        palette_path = palette["image"]  # путь к файлу палитры
+        await state.update_data(tp_palette_path=palette_path)
+
+        data = await state.get_data()
+        desc = (data.get("tp_description") or "").strip()
+
+        if desc:
+            # есть и текст, и палитра — запускаем пайплайн
+            await run_text_palette_pipeline(cb.message, state)
+        else:
+            # палитру выбрали, теперь просим текст
+            await send_step_message(
+                cb,
+                state,
+                "Палитру выбрали. Теперь, пожалуйста, опишите интерьер словами.",
+                reply_markup=BACK_INLINE_KB,
+                parse_mode="HTML",
+            )
+            await state.set_state(Flow.waiting_text_palette)
+
+        await cb.answer()
+    else:
+        await cb.answer()
+
 
 
 
