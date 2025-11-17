@@ -1,0 +1,17 @@
+[
+  {
+    "id": "warm_neutrals",
+    "name": "Тёплые нейтралы",
+    "image": "assets/palettes/1.jpg"
+  },
+  {
+    "id": "cool_grays",
+    "name": "Холодные серые",
+    "image": "assets/palettes/2.jpg"
+  },
+  {
+    "id": "dark_contrast",
+    "name": "Тёмный контраст",
+    "image": "assets/palettes/3.jpg"
+  }
+]
