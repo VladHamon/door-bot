@@ -1,0 +1,17 @@
+[
+  {
+    "id": "scandi_bedroom_1",
+    "name": "Скандинавская спальня",
+    "image": "assets/style_interiors/1.jpg"
+  },
+  {
+    "id": "japandi_living_1",
+    "name": "Гостиная в стиле Japandi",
+    "image": "assets/style_interiors/2.jpg"
+  },
+  {
+    "id": "loft_kitchen_1",
+    "name": "Кухня в стиле лофт",
+    "image": "assets/style_interiors/3.jpg"
+  }
+]
