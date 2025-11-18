@@ -89,6 +89,8 @@ class Flow(StatesGroup):
     selecting_color = State()
     generating = State()
     after_result = State()
+    recolor_selecting_color = State()  # ← НОВОЕ
+    editing_image = State()  
 
 # =========================== UTILS ===========================
 async def ensure_subscribed(user_id: int) -> bool:
@@ -721,6 +723,60 @@ async def gemini_generate(door_png: Path, color_text: str, interior_en: str, asp
     )
     return _resp_image_bytes(resp)
 
+async def gemini_recolor_image(base_image_path: Path, color_text: str, aspect: str = "3:4") -> bytes:
+    """
+    Перекрасить дверь на уже готовом изображении.
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = textwrap.dedent(f"""
+        Change the door color to {color_text}.
+        Keep all other elements of the scene exactly the same.
+        Do not move the door, do not change its geometry or surroundings.
+    """).strip()
+    img = Image.open(base_image_path).convert("RGBA")
+
+    cfg = types.GenerateContentConfig(
+        response_modalities=["Image"],
+        image_config=types.ImageConfig(aspect_ratio=aspect),
+        temperature=0.4,
+        top_p=0.5,
+    )
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-image",
+        contents=[prompt, img],
+        config=cfg,
+    )
+    return _resp_image_bytes(resp)
+
+
+async def gemini_edit_image(base_image_path: Path, edit_text: str, aspect: str = "3:4") -> bytes:
+    """
+    Внести правки в сцену по текстовому описанию пользователя.
+    """
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    prompt = textwrap.dedent(f"""
+        Apply the following modifications to the image: {edit_text}.
+        Preserve the door's position, geometry and color unless the instructions explicitly say otherwise.
+        Keep the overall style and composition as close as possible to the original.
+    """).strip()
+    img = Image.open(base_image_path).convert("RGBA")
+
+    cfg = types.GenerateContentConfig(
+        response_modalities=["Image"],
+        image_config=types.ImageConfig(aspect_ratio=aspect),
+        temperature=0.4,
+        top_p=0.5,
+    )
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-image",
+        contents=[prompt, img],
+        config=cfg,
+    )
+    return _resp_image_bytes(resp)
+
+
 def apply_watermark(image_bytes: bytes) -> bytes:
     """
     Накладывает большой полупрозрачный водяной знак, растянутый на всё изображение.
@@ -1300,6 +1356,49 @@ def build_mode_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+def build_after_result_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔁 Выбрать другую дверь для этого интерьера",
+                    callback_data="again:door",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎨 Выбрать другой цвет двери",
+                    callback_data="again:color",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚪 Нет двери (перегенерировать)",
+                    callback_data="again:regen",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Исправить картинку",
+                    callback_data="again:edit",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 Узнать цену двери",
+                    callback_data="again:price",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Начать сначала",
+                    callback_data="again:restart",
+                )
+            ],
+        ]
+    )
+
+
 
 async def send_mode_menu(msg: Message, state: FSMContext):
     await send_step_message(
@@ -1418,6 +1517,29 @@ async def go_back(cb: CallbackQuery, state: FSMContext):
             parse_mode="HTML",
         )
 
+    elif cur_state == Flow.recolor_selecting_color.state:
+        # Возвращаемся к экрану "Что дальше?"
+        kb = build_after_result_keyboard()
+        await send_step_message(
+            cb,
+            state,
+            "Что дальше?",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await state.set_state(Flow.after_result)
+
+    elif cur_state == Flow.editing_image.state:
+        # Пользователь передумал править картинку → назад к "Что дальше?"
+        kb = build_after_result_keyboard()
+        await send_step_message(
+            cb,
+            state,
+            "Что дальше?",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await state.set_state(Flow.after_result)
 
     # 4) Выбор стиля — назад к выбору режима
     elif cur_state == Flow.selecting_style.state:
@@ -2280,7 +2402,7 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
     typing_task = asyncio.create_task(
         run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
     )
-
+    
     try:
         # Генерация изображения двери
         img_bytes = await gemini_generate(
@@ -2293,6 +2415,20 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
         # ВАЖНО: сюда передаём именно user для whitelist'а
         if should_apply_watermark(user):
             img_bytes = apply_watermark(img_bytes)
+
+        # Сохраняем как "последний результат"
+        try:
+            result_dir = Path("work") / str(m.from_user.id)
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
+            result_path.write_bytes(img_bytes)
+            await state.update_data(
+                last_result_path=str(result_path),
+                last_color_text=color_text,
+                last_door_id=door_id,
+            )
+        except Exception as e:
+            print("SAVE_LAST_RESULT_ERROR:", repr(e))
 
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
@@ -2325,25 +2461,136 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
         await clear_loading(m.chat.id, state)
 
     # 3) Спрашиваем, что делать дальше
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔁 Выбрать другую дверь для этого интерьера",
-                    callback_data="again:door",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🆕 Начать заново с новым интерьером", callback_data="again:new"
-                )
-            ],
-        ]
-    )
+    kb = build_after_result_keyboard()
     await send_step_message(m, state, "Что дальше?", reply_markup=kb)
     await state.set_state(Flow.after_result)
 
 
+async def recolor_last_result(m: Message, state: FSMContext, user: User):
+    if not await ensure_subscribed(user.id):
+        await m.answer("Сначала подпишитесь на канал и вернитесь с /start.")
+        return
+
+    data = await state.get_data()
+    last_result_path = data.get("last_result_path")
+    color_text = data.get("color_text", "")
+
+    if not last_result_path or not Path(last_result_path).exists():
+        await m.answer("Не найдено последнее изображение для перекраски. Сначала сгенерируйте дверь.")
+        kb = build_after_result_keyboard()
+        await send_step_message(m, state, "Что дальше?", reply_markup=kb)
+        await state.set_state(Flow.after_result)
+        return
+
+    await state.set_state(Flow.generating)
+
+    await show_loading(
+        m,
+        state,
+        "⏳ Перекрашиваем дверь в новый цвет…\n\n"
+        "Стараемся сохранить весь интерьер таким, как был.",
+    )
+
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(
+        run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
+    )
+
+    try:
+        img_bytes = await gemini_recolor_image(Path(last_result_path), color_text)
+
+        if should_apply_watermark(user):
+            img_bytes = apply_watermark(img_bytes)
+
+        # пересохраняем как новый last_result_path
+        try:
+            result_dir = Path("work") / str(m.from_user.id)
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
+            result_path.write_bytes(img_bytes)
+            await state.update_data(last_result_path=str(result_path), last_color_text=color_text)
+        except Exception as e:
+            print("SAVE_LAST_RESULT_RECOLOR_ERROR:", repr(e))
+
+        try:
+            file = BufferedInputFile(img_bytes, filename="result_recolor.png")
+            await m.answer_photo(
+                photo=file,
+                caption=f"Новый цвет двери: {color_text}",
+            )
+        except Exception:
+            tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
+            tmp.write_bytes(img_bytes)
+            await m.answer_photo(
+                photo=FSInputFile(str(tmp)),
+                caption=f"Новый цвет двери: {color_text}",
+            )
+    except Exception as e:
+        print("RECOLOR_ERROR:", repr(e))
+        await m.answer("⚠️ Не удалось перекрасить дверь. Попробуйте другой цвет или перегенерируйте сцену.")
+    finally:
+        typing_stop.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
+        await clear_loading(m.chat.id, state)
+
+    kb = build_after_result_keyboard()
+    await send_step_message(m, state, "Что дальше?", reply_markup=kb)
+    await state.set_state(Flow.after_result)
+
+
+
+@router.callback_query(Flow.after_result, F.data == "again:color")
+async def again_color(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    colors = data.get("available_colors", [])
+
+    # если по какой-то причине цветов нет — делаем fallback по текущей двери
+    if not colors:
+        door_id = data.get("door_id")
+        if not door_id:
+            await cb.answer("Сначала выберите дверь и цвет.", show_alert=True)
+            return
+        try:
+            door = next(d for d in CATALOG if str(d["id"]) == str(door_id))
+        except StopIteration:
+            await cb.answer("Не удалось найти модель двери.", show_alert=True)
+            return
+        defaults = door.get("default_colors", []) or ["#FFFFFF", "#F3F0E6", "#1E1E1E"]
+        colors = [{"ral": hx, "name": hx, "reason_ru": ""} for hx in defaults]
+        await state.update_data(available_colors=colors)
+
+    kb, descr = build_colors_keyboard_and_text(colors)
+
+    # descr можно вывести отдельным сообщением (оно не будет удаляться), но можно и опустить
+    if descr:
+        await cb.message.answer("Рекомендуемые цвета для перекраски двери:\n\n" + descr)
+
+    await send_step_message(
+        cb,
+        state,
+        "Выберите новый цвет двери:",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await state.set_state(Flow.recolor_selecting_color)
+    await cb.answer()
+
+
+@router.callback_query(Flow.after_result, F.data == "again:regen")
+async def again_regen(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("interior_description_en") or not data.get("door_id") or not data.get("color_text"):
+        await cb.message.answer("Не хватает данных для перегенерации. Запустите заново: /start")
+        await state.clear()
+        await cb.answer()
+        return
+
+    # Просто повторно запускаем ту же генерацию
+    await cb.answer()
+    await generate_and_send(cb.message, state, cb.from_user)
 
 
 
@@ -2362,16 +2609,179 @@ async def again_door(cb: CallbackQuery, state: FSMContext):
     await show_or_update_carousel(cb.message, state, idx=0)
     await cb.answer()
 
-@router.callback_query(Flow.after_result, F.data == "again:new")
-async def again_new(cb: CallbackQuery, state: FSMContext):
+@router.callback_query(Flow.after_result, F.data == "again:restart")
+async def again_restart(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await send_mode_menu(cb.message, state)
+    await cb.answer()
+
+@router.callback_query(Flow.after_result, F.data == "again:edit")
+async def again_edit(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    last_result_path = data.get("last_result_path")
+    if not last_result_path or not Path(last_result_path).exists():
+        await cb.message.answer("Не найдено последнее изображение для правки. Сначала сгенерируйте дверную сцену.")
+        await cb.answer()
+        return
+
+    await state.set_state(Flow.editing_image)
     await send_step_message(
         cb,
         state,
-        "Пришлите новое фото интерьера.",
+        "Опишите словами, что нужно исправить в этой сцене.\n\n"
+        "Например: «убери вазу слева», «сделай стены светлее», «добавь немного зелени в интерьере».",
         reply_markup=BACK_INLINE_KB,
         parse_mode="HTML",
     )
-    await state.set_state(Flow.waiting_foto)
+    await cb.answer()
+
+@router.message(Flow.editing_image)
+async def handle_image_edit(m: Message, state: FSMContext):
+    edit_text = (m.text or "").strip()
+    if not edit_text:
+        await m.answer("Пожалуйста, опишите, что нужно изменить в сцене.")
+        return
+
+    data = await state.get_data()
+    last_result_path = data.get("last_result_path")
+    if not last_result_path or not Path(last_result_path).exists():
+        await m.answer("Не найдено последнее изображение для правки. Сначала сгенерируйте сцену.")
+        kb = build_after_result_keyboard()
+        await send_step_message(m, state, "Что дальше?", reply_markup=kb)
+        await state.set_state(Flow.after_result)
+        return
+
+    await state.set_state(Flow.generating)
+
+    await show_loading(
+        m,
+        state,
+        "⏳ Вносим правки в сцену по вашему описанию…",
+    )
+
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(
+        run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
+    )
+
+    try:
+        img_bytes = await gemini_edit_image(Path(last_result_path), edit_text)
+
+        if should_apply_watermark(m.from_user):
+            img_bytes = apply_watermark(img_bytes)
+
+        # пересохраняем как новый last_result_path
+        try:
+            result_dir = Path("work") / str(m.from_user.id)
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
+            result_path.write_bytes(img_bytes)
+            await state.update_data(last_result_path=str(result_path))
+        except Exception as e:
+            print("SAVE_LAST_RESULT_EDIT_ERROR:", repr(e))
+
+        try:
+            file = BufferedInputFile(img_bytes, filename="result_edit.png")
+            await m.answer_photo(
+                photo=file,
+                caption="Сцена с учётом ваших правок.",
+            )
+        except Exception:
+            tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
+            tmp.write_bytes(img_bytes)
+            await m.answer_photo(
+                photo=FSInputFile(str(tmp)),
+                caption="Сцена с учётом ваших правок.",
+            )
+    except Exception as e:
+        print("EDIT_IMAGE_ERROR:", repr(e))
+        await m.answer("⚠️ Не удалось применить правки. Попробуйте переформулировать запрос.")
+    finally:
+        typing_stop.set()
+        try:
+            await typing_task
+        except Exception:
+            pass
+        await clear_loading(m.chat.id, state)
+
+    kb = build_after_result_keyboard()
+    await send_step_message(m, state, "Что дальше?", reply_markup=kb)
+    await state.set_state(Flow.after_result)
+
+
+@router.callback_query(Flow.recolor_selecting_color, F.data.startswith("color_idx:"))
+async def recolor_color_from_list(cb: CallbackQuery, state: FSMContext):
+    idx = int(cb.data.split(":")[1])
+    data = await state.get_data()
+    colors = data.get("available_colors", [])
+    if 0 <= idx < len(colors):
+        c = colors[idx]
+        name = c.get("name", "").strip()
+        ral = parse_color(c.get("ral", "").strip()) if c.get("ral") else ""
+        hexv = parse_color(c.get("hex", "").strip()) if c.get("hex") else ""
+        chosen_text = " ".join([v for v in [ral, name] if v]) or hexv or name or "neutral"
+        await state.update_data(color_raw=c, color_text=chosen_text)
+        await cb.answer()
+        await recolor_last_result(cb.message, state, cb.from_user)
+    else:
+        await cb.answer("Неверный выбор цвета", show_alert=True)
+
+@router.callback_query(Flow.recolor_selecting_color, F.data == "color:custom")
+async def ask_custom_recolor_color(cb: CallbackQuery, state: FSMContext):
+    await send_step_message(
+        cb,
+        state,
+        "Напишите новый цвет двери: #HEX (например <code>#F3F0E6</code>), или <code>RAL 9010</code>, или простым словом (white, beige…).",
+        parse_mode="HTML",
+    )
+    await cb.answer()
+
+
+@router.message(Flow.recolor_selecting_color)
+async def typed_recolor_color(m: Message, state: FSMContext):
+    color_user = parse_color(m.text or "")
+    if not color_user:
+        await m.answer("Не удалось распознать цвет. Попробуйте снова: #HEX, RAL XXXX или название.")
+        return
+    await state.update_data(color_raw={"input": m.text.strip()}, color_text=color_user)
+    await recolor_last_result(m, state, m.from_user)
+
+
+@router.callback_query(Flow.after_result, F.data == "again:price")
+async def again_price(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    door_id = data.get("door_id")
+    color_text = data.get("color_text", "")
+    if not door_id:
+        await cb.message.answer("Модель двери не выбрана. Сначала завершите подбор двери.")
+        await cb.answer()
+        return
+
+    try:
+        door = next(d for d in CATALOG if str(d["id"]) == str(door_id))
+    except StopIteration:
+        await cb.message.answer("Не удалось найти модель двери.")
+        await cb.answer()
+        return
+
+    user = cb.from_user
+    user_tag = f"@{user.username}" if user.username else f"id {user.id}"
+
+    manager_text = (
+        f"🔔 Запрос цены двери\n\n"
+        f"Пользователь: {user_tag}\n"
+        f"Модель двери: {door.get('name', 'Без названия')} (id: {door_id})\n"
+        f"Выбранный цвет: {color_text or 'не указан'}\n"
+        f"Чат: {cb.message.chat.id}"
+    )
+
+    try:
+        await bot.send_message(chat_id="@Vlodekteper", text=manager_text)
+        await cb.message.answer("Я отправил информацию о двери нашему менеджеру @Vlodekteper. Он свяжется с вами в Telegram.")
+    except Exception as e:
+        print("SEND_PRICE_REQUEST_ERROR:", repr(e))
+        await cb.message.answer("Не удалось отправить запрос менеджеру. Попробуйте позже или напишите @Vlodekteper вручную.")
+
     await cb.answer()
 
 
