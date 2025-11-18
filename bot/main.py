@@ -2194,11 +2194,6 @@ async def palette_carousel_nav(cb: CallbackQuery, state: FSMContext):
     else:
         await cb.answer()
 
-
-
-
-
-
 @router.callback_query(Flow.selecting_door, F.data.startswith("carousel:"))
 async def carousel_nav(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -2611,9 +2606,20 @@ async def again_door(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(Flow.after_result, F.data == "again:restart")
 async def again_restart(cb: CallbackQuery, state: FSMContext):
+    # 1) Сначала удаляем текущее сообщение с кнопками "Что дальше?"
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+
+    # 2) Полностью сбрасываем состояние (можно, ты уже удалил меню)
     await state.clear()
+
+    # 3) Показываем самое первое меню выбора режима
     await send_mode_menu(cb.message, state)
+
     await cb.answer()
+
 
 @router.callback_query(Flow.after_result, F.data == "again:edit")
 async def again_edit(cb: CallbackQuery, state: FSMContext):
@@ -2776,11 +2782,11 @@ async def again_price(cb: CallbackQuery, state: FSMContext):
     )
 
     try:
-        await bot.send_message(chat_id="@Vlodekteper", text=manager_text)
-        await cb.message.answer("Я отправил информацию о двери нашему менеджеру @Vlodekteper. Он свяжется с вами в Telegram.")
+        await bot.send_message(chat_id="@Xl73l", text=manager_text)
+        await cb.message.answer("Я отправил информацию о двери нашему менеджеру @Xl73l. Он свяжется с вами в Telegram.")
     except Exception as e:
         print("SEND_PRICE_REQUEST_ERROR:", repr(e))
-        await cb.message.answer("Не удалось отправить запрос менеджеру. Попробуйте позже или напишите @Vlodekteper вручную.")
+        await cb.message.answer("Не удалось отправить запрос менеджеру. Попробуйте позже или напишите @Xl73l вручную.")
 
     await cb.answer()
 
