@@ -55,12 +55,10 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-CATALOG = json.loads(Path("catalog.json").read_text(encoding="utf-8"))
+CATALOG = json.loads((BASE_DIR / "catalog.json").read_text(encoding="utf-8"))
+PALETTES = json.loads((BASE_DIR / "palettes.json").read_text(encoding="utf-8"))
+STYLE_GALLERY = json.loads((BASE_DIR / "style_gallery.json").read_text(encoding="utf-8"))
 
-CATALOG = json.loads(Path("catalog.json").read_text(encoding="utf-8"))
-
-PALETTES = json.loads(Path("palettes.json").read_text(encoding="utf-8"))
-STYLE_GALLERY = json.loads(Path("style_gallery.json").read_text(encoding="utf-8"))
 
 
 STYLE_OPTIONS: List[Tuple[str, str, str]] = [
@@ -1162,7 +1160,7 @@ async def show_or_update_carousel(cb_or_msg, state: FSMContext, idx: int):
     door_global_idx = door_order[idx]
     door = CATALOG[door_global_idx]
 
-    img_path = Path(door["image_png"])
+    img_path = (BASE_DIR / door["image_png"]).resolve()
     caption = door_caption(door, idx)
     kb = build_carousel_keyboard(idx)
 
@@ -1246,7 +1244,7 @@ async def show_or_update_palette_carousel(cb_or_msg, state: FSMContext, idx: int
     await state.update_data(palette_idx=idx)
 
     palette = PALETTES[idx]
-    img_path = Path(palette["image"])
+    img_path = (BASE_DIR / palette["image"]).resolve()
     caption = palette_caption(palette, idx)
     kb = build_palette_carousel_keyboard(idx)
 
@@ -2069,7 +2067,7 @@ async def show_or_update_style_carousel(cb_or_msg, state: FSMContext, idx: int):
     await state.update_data(style_idx=idx)
 
     style_item = STYLE_GALLERY[idx]
-    img_path = Path(style_item["image"])
+    img_path = (BASE_DIR / style_item["image"]).resolve()
     caption = style_caption(style_item, idx)
     kb = build_style_carousel_keyboard(idx)
 
@@ -2606,20 +2604,22 @@ async def again_door(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(Flow.after_result, F.data == "again:restart")
 async def again_restart(cb: CallbackQuery, state: FSMContext):
-    # 1) Сначала удаляем текущее сообщение с кнопками "Что дальше?"
+    # 1) удаляем текущее сообщение с кнопками "Что дальше?"
     try:
         await cb.message.delete()
     except Exception:
         pass
 
-    # 2) Полностью сбрасываем состояние (можно, ты уже удалил меню)
+    # 2) обнуляем служебные id (на всякий случай)
+    await state.update_data(last_bot_message_id=None, loading_sticker_id=None)
+
+    # 3) сбрасываем состояние
     await state.clear()
 
-    # 3) Показываем самое первое меню выбора режима
+    # 4) показываем самое первое меню
     await send_mode_menu(cb.message, state)
 
     await cb.answer()
-
 
 @router.callback_query(Flow.after_result, F.data == "again:edit")
 async def again_edit(cb: CallbackQuery, state: FSMContext):
