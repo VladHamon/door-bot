@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, ValidationError
+from database import db
 
 import aiofiles
 import httpx
@@ -1493,6 +1494,14 @@ async def start(m: Message, state: FSMContext):
         )
         return
 
+    await db.log(
+        user_id=m.from_user.id,
+        username=m.from_user.username,
+        event_type="command",
+        event_name="/start",
+        details="User started the bot"
+    )
+
     await send_disclaimer(m, state)
 
 
@@ -2372,6 +2381,14 @@ async def carousel_nav(cb: CallbackQuery, state: FSMContext):
     idx = current_catalog_index(data)
     action = cb.data.split(":")[1]
 
+    await db.log(
+        user_id=cb.from_user.id,
+        username=cb.from_user.username,
+        event_type="click",
+        event_name=f"carousel:{action}",
+        details=f"Current index: {idx}"
+    )
+
     if action == "prev":
         idx = (idx - 1) % len(door_order)
         await show_or_update_carousel(cb, state, idx)
@@ -2586,6 +2603,14 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
         async with aiofiles.open(result_path, 'wb') as f:
             await f.write(img_bytes)
 
+        await db.log(
+            user_id=user.id,
+            username=user.username,
+            event_type="generation",
+            event_name="gemini_generate",
+            details=f"Door: {door['name']} (ID: {door_id}), Color: {color_text}"
+        )
+
         # Отправляем фото
         sent_msg = None
         try:
@@ -2681,6 +2706,13 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
         
         async with aiofiles.open(result_path, 'wb') as f:
             await f.write(img_bytes)
+
+        await db.log(
+            user_id=user.id,
+            username=user.username,
+            event_type="generation",
+            event_name="recolor",
+            details=f"New Color: {color_text}"
         
         # Отправляем
         sent_msg = None
@@ -3001,11 +3033,17 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # При старте: запускаем фоновую задачу очистки
+    # 1. Подключаемся к базе
+    await db.connect()
+    
+    # 2. Запускаем очистку файлов
     cleanup_task = asyncio.create_task(cleanup_old_files())
+    
     yield
-    # При выключении: можно отменить задачу, но для Render это не критично
+    
+    # 3. При выключении
     cleanup_task.cancel()
+    await db.close()
 
 app = FastAPI(lifespan=lifespan) # <--- ДОБАВИЛИ lifespan СЮДА
 @app.get("/")
