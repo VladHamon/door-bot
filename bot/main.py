@@ -10,6 +10,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from pydantic import BaseModel, Field, ValidationError
 
 import aiofiles
 import httpx
@@ -35,6 +36,30 @@ from google import genai
 from google.genai import types
 from PIL import Image
 from redis.asyncio import Redis
+
+# =========================== PYDANTIC MODELS ===========================
+
+class DoorColor(BaseModel):
+    ral: str = Field(..., description="RAL code, e.g. 'RAL 9016'")
+    name: str = Field(..., description="Human readable color name")
+    why: str = Field(..., description="Reason why this color fits")
+
+class InteriorSummary(BaseModel):
+    interior_description: str
+    door_colors: List[DoorColor]
+
+class RecommendedColor(BaseModel):
+    ral: str
+    name: str
+    label: str
+
+class InteriorAnalysisResponse(BaseModel):
+    summary: InteriorSummary
+    # Используем Dict[str, int], так как ключи стилей могут быть динамическими, 
+    # но лучше их перечислить, если список стилей фиксирован. 
+    # Для гибкости оставим Dict.
+    styles: Dict[str, int] 
+    recommended_colors: List[RecommendedColor]
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -531,20 +556,43 @@ Return ONLY the JSON, with no explanations before or after.
 
 
 def _parse_interior_json(txt: str) -> Optional[dict]:
-    txt = txt.strip()
+    """
+    Пытается извлечь JSON из текста и валидировать его через Pydantic.
+    Возвращает dict, если валидация успешна, иначе None.
+    """
     if not txt:
         return None
-
+    
+    # 1. Очистка от маркдауна (на всякий случай)
+    clean_txt = txt.replace("```json", "").replace("```", "").strip()
+    
+    raw_json = None
+    
+    # 2. Попытка прямого парсинга
     try:
-        return json.loads(txt)
-    except Exception as e:
-        print("INTERIOR_JSON_PARSE_ERROR (direct):", repr(e))
+        raw_json = json.loads(clean_txt)
+    except json.JSONDecodeError:
+        # 3. Если не вышло, пробуем найти блок {...}
+        j_block = extract_json_block(clean_txt) # Твоя старая вспомогательная функция
+        if j_block:
+            raw_json = j_block
+    
+    if raw_json is None:
+        print("JSON_PARSE_FAIL: Could not find valid JSON object.")
+        return None
 
-    j = extract_json_block(txt)
-    if not j:
-        print("INTERIOR_JSON_EXTRACT_FAILED, raw snippet:", txt[:500])
-    return j
-
+    # 4. ВАЛИДАЦИЯ ЧЕРЕЗ PYDANTIC
+    try:
+        # Pydantic проверит типы и наличие обязательных полей
+        validated_model = InteriorAnalysisResponse(**raw_json)
+        # Возвращаем обратно в виде dict, чтобы не ломать остальной код бота
+        return validated_model.model_dump() 
+    except ValidationError as e:
+        print(f"PYDANTIC_VALIDATION_ERROR: {e}")
+        # Опционально: можно попытаться вернуть "частично живой" raw_json, 
+        # но безопаснее вернуть None и уйти в fallback (дефолтные двери),
+        # чем работать с битыми данными.
+        return None
 
 
 
@@ -568,11 +616,7 @@ async def analyze_scene_json_from_image(image_path: Path) -> Optional[dict]:
         config=cfg,
     )
     txt = _resp_text(resp).strip()
-    try:
-        return json.loads(txt)
-    except Exception as e:
-        print("INTERIOR_JSON_IMAGE_PARSE_ERROR:", repr(e))
-        return _parse_interior_json(txt)
+    return _parse_interior_json(txt)
 
 
 
@@ -602,10 +646,7 @@ async def analyze_scene_json_from_text_and_palette(
         config=cfg,
     )
     txt = _resp_text(resp).strip()
-    try:
-        return json.loads(txt)
-    except Exception:
-        return _parse_interior_json(txt)
+    return _parse_interior_json(txt)
 
 
 
@@ -622,10 +663,7 @@ async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
         config=cfg,
     )
     txt = _resp_text(resp).strip()
-    try:
-        return json.loads(txt)
-    except Exception:
-        return _parse_interior_json(txt)
+    return _parse_interior_json(txt)
 
 
 
