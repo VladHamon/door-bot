@@ -18,7 +18,8 @@ from aiogram.types import (
     FSInputFile,
     InputMediaPhoto,
 )
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage
+from redis.asyncio import Redis
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from PIL import Image
@@ -48,10 +49,24 @@ load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+
 REQUIRED_BUILDER2112 = os.getenv("REQUIRED_CHANNEL", "@yourdoorshop")
 
+# --- НАЧАЛО ИЗМЕНЕНИЙ ---
+# Получаем URL из переменных окружения (которые мы настроили на Render)
+# Если переменной нет (локальный запуск), используем локальный Redis
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+# Создаем подключение к Redis
+redis_client = Redis.from_url(REDIS_URL)
+
+# Инициализируем хранилище Redis вместо MemoryStorage
+storage = RedisStorage(redis=redis_client)
+
 bot = Bot(BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=storage)
+# --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
 router = Router()
 dp.include_router(router)
 
