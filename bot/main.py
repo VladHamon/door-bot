@@ -2713,6 +2713,7 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
             event_type="generation",
             event_name="recolor",
             details=f"New Color: {color_text}"
+        )
         
         # Отправляем
         sent_msg = None
