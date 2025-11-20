@@ -125,6 +125,48 @@ async def tg_download_photo(message: Message, dest: Path) -> Path:
     dest.write_bytes(data)
     return dest
 
+# =========================== НОВАЯ ФУНКЦИЯ UTILS ===========================
+async def get_or_recover_image(state: FSMContext, bot: Bot) -> Optional[Path]:
+    """
+    Пытается найти картинку на диске. 
+    Если диск был очищен (перезагрузка Render), скачивает её заново из Telegram по file_id.
+    """
+    data = await state.get_data()
+    path_str = data.get("last_result_path")
+    file_id = data.get("last_result_file_id") # Мы будем сохранять это поле
+
+    # 1. Если файл есть на диске — возвращаем его
+    if path_str and Path(path_str).exists():
+        return Path(path_str)
+
+    # 2. Если файла нет, но есть file_id — восстанавливаем
+    if file_id:
+        try:
+            # Создаем временную папку, если её нет
+            workdir = Path("work") / "restored"
+            workdir.mkdir(parents=True, exist_ok=True)
+            
+            # Генерируем путь
+            new_path = workdir / f"restored_{uuid.uuid4().hex}.png"
+            
+            # Скачиваем файл через API Telegram
+            file_info = await bot.get_file(file_id)
+            url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+            
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                new_path.write_bytes(r.content)
+            
+            # Обновляем путь в стейте, чтобы в следующий раз брать с диска
+            await state.update_data(last_result_path=str(new_path))
+            return new_path
+        except Exception as e:
+            print(f"RECOVERY_ERROR: {e}")
+            return None
+
+    return None
+
 def parse_color(s: str) -> str:
     """
     Принимает: #HEX, 'RAL 9010', 'white', 'beige'...
@@ -2410,7 +2452,7 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
     typing_task = asyncio.create_task(
         run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
     )
-    
+# ВНУТРИ try блока, где происходит генерация и отправка:
     try:
         # Генерация изображения двери
         img_bytes = await gemini_generate(
@@ -2420,45 +2462,51 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
             aspect="3:4",
         )
 
-        # ВАЖНО: сюда передаём именно user для whitelist'а
         if should_apply_watermark(user):
             img_bytes = apply_watermark(img_bytes)
 
-        # Сохраняем как "последний результат"
-        try:
-            result_dir = Path("work") / str(m.from_user.id)
-            result_dir.mkdir(parents=True, exist_ok=True)
-            result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
-            result_path.write_bytes(img_bytes)
-            await state.update_data(
-                last_result_path=str(result_path),
-                last_color_text=color_text,
-                last_door_id=door_id,
-            )
-        except Exception as e:
-            print("SAVE_LAST_RESULT_ERROR:", repr(e))
+        # Сохраняем на диск
+        result_dir = Path("work") / str(m.from_user.id)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
+        result_path.write_bytes(img_bytes)
 
+        # Отправляем фото и СОХРАНЯЕМ file_id
+        sent_msg = None
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
-            await m.answer_photo(
+            sent_msg = await m.answer_photo(
                 photo=file,
                 caption=(
                     f"{door['name']} — выбранный цвет: {color_text}\n"
-                    f"Дверь по центру задней стены, полностью видима (ничем не закрыта)."
+                    f"Дверь по центру задней стены, полностью видима."
                 ),
             )
         except Exception:
-            tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
-            tmp.write_bytes(img_bytes)
+            # Fallback если BufferedInputFile не сработал
             await m.answer_photo(
-                photo=FSInputFile(str(tmp)),
+                photo=FSInputFile(str(result_path)),
                 caption=f"{door['name']} — выбранный цвет: {color_text}",
             )
-    except Exception as e:
-        print("GENERATION_ERROR:", repr(e))
-        await m.answer(
-            "⚠️ Не удалось сгенерировать изображение. Проверьте ключи и попробуйте ещё раз."
+            # Примечание: здесь сложнее достать file_id, но это редкий кейс
+
+        # --- ВАЖНОЕ ИЗМЕНЕНИЕ: СОХРАНЯЕМ file_id ---
+        file_id_to_save = None
+        if sent_msg and sent_msg.photo:
+            # Берем самый большой размер фото
+            file_id_to_save = sent_msg.photo[-1].file_id
+
+        await state.update_data(
+            last_result_path=str(result_path),
+            last_color_text=color_text,
+            last_door_id=door_id,
+            last_result_file_id=file_id_to_save # <--- ДОБАВИЛИ ЭТО
         )
+
+    except Exception as e:
+        # ... (обработка ошибок, как была) ...
+        print("GENERATION_ERROR:", repr(e))
+        await m.answer("⚠️ Ошибка генерации.")
     finally:
         typing_stop.set()
         try:
@@ -2480,11 +2528,14 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
         return
 
     data = await state.get_data()
-    last_result_path = data.get("last_result_path")
     color_text = data.get("color_text", "")
 
-    if not last_result_path or not Path(last_result_path).exists():
-        await m.answer("Не найдено последнее изображение для перекраски. Сначала сгенерируйте дверь.")
+    # --- ИЗМЕНЕНИЕ: ИСПОЛЬЗУЕМ ФУНКЦИЮ ВОССТАНОВЛЕНИЯ ---
+    # Вместо прямой проверки Path.exists(), просим функцию найти или скачать файл
+    current_image_path = await get_or_recover_image(state, bot)
+
+    if not current_image_path or not current_image_path.exists():
+        await m.answer("Не найдено последнее изображение (и не удалось восстановить). Сгенерируйте заново.")
         kb = build_after_result_keyboard()
         await send_step_message(m, state, "Что дальше?", reply_markup=kb)
         await state.set_state(Flow.after_result)
@@ -2495,8 +2546,7 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
     await show_loading(
         m,
         state,
-        "⏳ Перекрашиваем дверь в новый цвет…\n\n"
-        "Стараемся сохранить весь интерьер таким, как был.",
+        "⏳ Перекрашиваем дверь в новый цвет…",
     )
 
     typing_stop = asyncio.Event()
@@ -2505,37 +2555,48 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
     )
 
     try:
-        img_bytes = await gemini_recolor_image(Path(last_result_path), color_text)
+        # Используем current_image_path, который мы восстановили
+        img_bytes = await gemini_recolor_image(current_image_path, color_text)
 
         if should_apply_watermark(user):
             img_bytes = apply_watermark(img_bytes)
 
-        # пересохраняем как новый last_result_path
-        try:
-            result_dir = Path("work") / str(m.from_user.id)
-            result_dir.mkdir(parents=True, exist_ok=True)
-            result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
-            result_path.write_bytes(img_bytes)
-            await state.update_data(last_result_path=str(result_path), last_color_text=color_text)
-        except Exception as e:
-            print("SAVE_LAST_RESULT_RECOLOR_ERROR:", repr(e))
-
+        # Сохраняем результат
+        result_dir = Path("work") / str(m.from_user.id)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
+        result_path.write_bytes(img_bytes)
+        
+        # Отправляем
+        sent_msg = None
         try:
             file = BufferedInputFile(img_bytes, filename="result_recolor.png")
-            await m.answer_photo(
+            sent_msg = await m.answer_photo(
                 photo=file,
                 caption=f"Новый цвет двери: {color_text}",
             )
         except Exception:
             tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
             tmp.write_bytes(img_bytes)
-            await m.answer_photo(
+            sent_msg = await m.answer_photo(
                 photo=FSInputFile(str(tmp)),
                 caption=f"Новый цвет двери: {color_text}",
             )
+
+        # --- ИЗМЕНЕНИЕ: СОХРАНЯЕМ НОВЫЙ file_id ---
+        new_file_id = None
+        if sent_msg and sent_msg.photo:
+            new_file_id = sent_msg.photo[-1].file_id
+
+        await state.update_data(
+            last_result_path=str(result_path), 
+            last_color_text=color_text,
+            last_result_file_id=new_file_id # <--- ОБНОВЛЯЕМ ID
+        )
+
     except Exception as e:
         print("RECOLOR_ERROR:", repr(e))
-        await m.answer("⚠️ Не удалось перекрасить дверь. Попробуйте другой цвет или перегенерируйте сцену.")
+        await m.answer("⚠️ Не удалось перекрасить дверь.")
     finally:
         typing_stop.set()
         try:
@@ -2638,10 +2699,15 @@ async def again_restart(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(Flow.after_result, F.data == "again:edit")
 async def again_edit(cb: CallbackQuery, state: FSMContext):
+    # --- ИЗМЕНЕНИЕ: ПРОВЕРЯЕМ ВОЗМОЖНОСТЬ ВОССТАНОВЛЕНИЯ ---
+    # Мы не качаем файл прямо сейчас (это долго), мы просто проверяем, 
+    # есть ли он или есть ли file_id, чтобы скачать его позже.
     data = await state.get_data()
-    last_result_path = data.get("last_result_path")
-    if not last_result_path or not Path(last_result_path).exists():
-        await cb.message.answer("Не найдено последнее изображение для правки. Сначала сгенерируйте дверную сцену.")
+    has_path = data.get("last_result_path") and Path(data.get("last_result_path")).exists()
+    has_id = data.get("last_result_file_id")
+
+    if not has_path and not has_id:
+        await cb.message.answer("Не найдено изображение для правки. Сгенерируйте заново.")
         await cb.answer()
         return
 
@@ -2663,22 +2729,18 @@ async def handle_image_edit(m: Message, state: FSMContext):
         await m.answer("Пожалуйста, опишите, что нужно изменить в сцене.")
         return
 
-    data = await state.get_data()
-    last_result_path = data.get("last_result_path")
-    if not last_result_path or not Path(last_result_path).exists():
-        await m.answer("Не найдено последнее изображение для правки. Сначала сгенерируйте сцену.")
+    # --- ИЗМЕНЕНИЕ: ВОССТАНАВЛИВАЕМ ФАЙЛ ---
+    current_image_path = await get_or_recover_image(state, bot)
+
+    if not current_image_path or not current_image_path.exists():
+        await m.answer("Не удалось восстановить изображение. Пожалуйста, сгенерируйте сцену заново.")
         kb = build_after_result_keyboard()
         await send_step_message(m, state, "Что дальше?", reply_markup=kb)
         await state.set_state(Flow.after_result)
         return
 
     await state.set_state(Flow.generating)
-
-    await show_loading(
-        m,
-        state,
-        "⏳ Вносим правки в сцену по вашему описанию…",
-    )
+    await show_loading(m, state, "⏳ Вносим правки в сцену по вашему описанию…")
 
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(
@@ -2686,37 +2748,39 @@ async def handle_image_edit(m: Message, state: FSMContext):
     )
 
     try:
-        img_bytes = await gemini_edit_image(Path(last_result_path), edit_text)
+        # Используем current_image_path
+        img_bytes = await gemini_edit_image(current_image_path, edit_text)
 
         if should_apply_watermark(m.from_user):
             img_bytes = apply_watermark(img_bytes)
 
-        # пересохраняем как новый last_result_path
-        try:
-            result_dir = Path("work") / str(m.from_user.id)
-            result_dir.mkdir(parents=True, exist_ok=True)
-            result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
-            result_path.write_bytes(img_bytes)
-            await state.update_data(last_result_path=str(result_path))
-        except Exception as e:
-            print("SAVE_LAST_RESULT_EDIT_ERROR:", repr(e))
-
+        result_dir = Path("work") / str(m.from_user.id)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
+        result_path.write_bytes(img_bytes)
+        
+        sent_msg = None
         try:
             file = BufferedInputFile(img_bytes, filename="result_edit.png")
-            await m.answer_photo(
-                photo=file,
-                caption="Сцена с учётом ваших правок.",
-            )
+            sent_msg = await m.answer_photo(photo=file, caption="Сцена с учётом ваших правок.")
         except Exception:
             tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
             tmp.write_bytes(img_bytes)
-            await m.answer_photo(
-                photo=FSInputFile(str(tmp)),
-                caption="Сцена с учётом ваших правок.",
-            )
+            sent_msg = await m.answer_photo(photo=FSInputFile(str(tmp)), caption="Сцена с учётом ваших правок.")
+
+        # --- ИЗМЕНЕНИЕ: СОХРАНЯЕМ НОВЫЙ file_id ---
+        new_file_id = None
+        if sent_msg and sent_msg.photo:
+            new_file_id = sent_msg.photo[-1].file_id
+
+        await state.update_data(
+            last_result_path=str(result_path),
+            last_result_file_id=new_file_id # <--- ОБНОВЛЯЕМ
+        )
+
     except Exception as e:
         print("EDIT_IMAGE_ERROR:", repr(e))
-        await m.answer("⚠️ Не удалось применить правки. Попробуйте переформулировать запрос.")
+        await m.answer("⚠️ Не удалось применить правки.")
     finally:
         typing_stop.set()
         try:
