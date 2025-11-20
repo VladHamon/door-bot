@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 import aiofiles
 
+from fastapi import HTTPException, Header
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, Router
@@ -50,6 +51,7 @@ load_dotenv()
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+TELEGRAM_SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN", "")
 
 REQUIRED_BUILDER2112 = os.getenv("REQUIRED_CHANNEL", "@yourdoorshop")
 
@@ -2878,8 +2880,23 @@ app = FastAPI()
 async def _health():
     return {"ok": True}
 
+ # Добавь Header в импорты если нет
+
 @app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    update = await request.json()
-    await dp.feed_webhook_update(bot, update)
-    return {"ok": True}
+async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str = Header(None)):
+    """
+    Обработчик вебхука с проверкой секретного токена от Telegram.
+    """
+    # Проверяем, совпадает ли токен из заголовка с нашим ENV
+    if TELEGRAM_SECRET_TOKEN and x_telegram_bot_api_secret_token != TELEGRAM_SECRET_TOKEN:
+        # Если токены не совпадают — посылаем хакера подальше (401 Unauthorized)
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        update = await request.json()
+        # Запускаем обработку апдейта в фоне или ждем (тут await ok, так как мы оптимизировали I/O)
+        await dp.feed_webhook_update(bot, update)
+        return {"ok": True}
+    except Exception as e:
+        print(f"WEBHOOK_ERROR: {e}")
+        return {"ok": False}
