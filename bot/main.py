@@ -892,7 +892,7 @@ async def gemini_generate(door_png: Path, color_text: str, interior_en: str, asp
 
     # Async call
     resp = await client.aio.models.generate_content(
-        model="gemini-2.5-flash-image",
+        model="gemini-3-pro-image-preview",
         contents=[prompt, img],
         config=cfg,
     )
@@ -917,7 +917,7 @@ async def gemini_recolor_image(base_image_path: Path, color_text: str, aspect: s
     )
 
     resp = await client.aio.models.generate_content(
-        model="gemini-2.5-flash-image",
+        model="gemini-3-pro-image-preview",
         contents=[prompt, img],
         config=cfg,
     )
@@ -950,7 +950,7 @@ async def gemini_edit_image(base_image_path: Path, edit_text: str, aspect: str =
     )
 
     resp = await client.aio.models.generate_content(
-        model="gemini-2.5-flash-image",
+        model="gemini-3-pro-image-preview",
         contents=[prompt, img],
         config=cfg,
     )
