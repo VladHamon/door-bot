@@ -3,6 +3,7 @@ import asyncpg
 from datetime import datetime
 from urllib.parse import urlparse
 
+
 class Database:
     def __init__(self):
         self.pool = None
