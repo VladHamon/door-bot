@@ -1,31 +1,40 @@
+import asyncio
+import io
+import json
+import os
+import re
+import shutil
+import textwrap
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import aiofiles
+import httpx
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.enums import ChatAction
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
+    User,
+)
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException, Request
 from google import genai
 from google.genai import types
-import os, json, io, uuid, re, asyncio, textwrap
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-import aiofiles
-
-from fastapi import HTTPException, Header
-from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart
-from aiogram.enums import ChatAction
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    BufferedInputFile,
-    FSInputFile,
-    InputMediaPhoto,
-)
-from aiogram.fsm.storage.redis import RedisStorage
-from redis.asyncio import Redis
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
 from PIL import Image
-import httpx
+from redis.asyncio import Redis
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -174,6 +183,61 @@ async def get_or_recover_image(state: FSMContext, bot: Bot) -> Optional[Path]:
             return None
 
     return None
+
+
+async def cleanup_old_files():
+    """
+    Фоновая задача: удаляет папки и файлы из work/, которые старше 1 часа.
+    Запускается каждые 20 минут.
+    """
+    work_dir = BASE_DIR / "work"
+    # Если папки нет, создаем (на всякий случай)
+    work_dir.mkdir(exist_ok=True)
+
+    while True:
+        try:
+            # Ждем 20 минут перед следующей чисткой
+            await asyncio.sleep(1200) 
+            
+            now = time.time()
+            cutoff = now - 3600  # 1 час назад (3600 секунд)
+            
+            if not work_dir.exists():
+                continue
+
+            # Проходим по подпапкам (id пользователей)
+            for user_dir in work_dir.iterdir():
+                if user_dir.is_dir():
+                    # Проверяем время модификации папки пользователя
+                    # (или можно проверять файлы внутри, но проще сносить папку целиком)
+                    try:
+                        mtime = user_dir.stat().st_mtime
+                        if mtime < cutoff:
+                            shutil.rmtree(user_dir, ignore_errors=True)
+                            print(f"CLEANUP: Removed old dir {user_dir}")
+                    except Exception as e:
+                        print(f"CLEANUP_ERROR for {user_dir}: {e}")
+
+            # Удаляем отдельные файлы в корне work (если есть, например restored)
+            for file_path in work_dir.iterdir():
+                 if file_path.is_file():
+                     try:
+                         if file_path.stat().st_mtime < cutoff:
+                             file_path.unlink()
+                     except Exception: pass
+            
+            # Отдельно чистим папку restored
+            restored_dir = work_dir / "restored"
+            if restored_dir.exists():
+                for f in restored_dir.iterdir():
+                    if f.stat().st_mtime < cutoff:
+                        try: f.unlink() 
+                        except: pass
+
+        except Exception as e:
+            print(f"GLOBAL_CLEANUP_ERROR: {e}")
+            # Если ошибка, ждем минуту и пробуем снова, чтобы не спамить логами
+            await asyncio.sleep(60)
 
 def parse_color(s: str) -> str:
     """
@@ -2895,8 +2959,17 @@ async def reject_door_photo(m: Message):
     await m.answer("Пожалуйста, используйте карусель — вы не можете отправить своё фото двери. Листайте и выберите модель кнопкой «✅ Выбрать».")
 
 # =========================== FASTAPI ===========================
-app = FastAPI()
+from contextlib import asynccontextmanager
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # При старте: запускаем фоновую задачу очистки
+    cleanup_task = asyncio.create_task(cleanup_old_files())
+    yield
+    # При выключении: можно отменить задачу, но для Render это не критично
+    cleanup_task.cancel()
+
+app = FastAPI(lifespan=lifespan) # <--- ДОБАВИЛИ lifespan СЮДА
 @app.get("/")
 async def _health():
     return {"ok": True}
