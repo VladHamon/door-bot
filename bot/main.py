@@ -3,6 +3,7 @@ from google.genai import types
 import os, json, io, uuid, re, asyncio, textwrap
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+import aiofiles
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -121,8 +122,13 @@ async def tg_download_photo(message: Message, dest: Path) -> Path:
         r = await client.get(url)
         r.raise_for_status()
         data = r.content
+    
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
+    
+    # АСИНХРОННАЯ ЗАПИСЬ
+    async with aiofiles.open(dest, 'wb') as f_out:
+        await f_out.write(data)
+        
     return dest
 
 # =========================== НОВАЯ ФУНКЦИЯ UTILS ===========================
@@ -479,14 +485,18 @@ def _parse_interior_json(txt: str) -> Optional[dict]:
 async def analyze_scene_json_from_image(image_path: Path) -> Optional[dict]:
     """JSON-анализ интерьера по фото."""
     client = genai.Client(api_key=GEMINI_API_KEY)
-    img = Image.open(image_path).convert("RGB")
+    
+    # 1. Картинку открываем в отдельном потоке
+    img = await asyncio.to_thread(Image.open, image_path)
+    img = await asyncio.to_thread(img.convert, "RGB")
 
     cfg = types.GenerateContentConfig(
         temperature=0.2,
         response_mime_type="application/json",
     )
 
-    resp = client.models.generate_content(
+    # 2. Используем client.aio (асинхронный вызов)
+    resp = await client.aio.models.generate_content(
         model="gemini-2.5-flash",
         contents=[INTERIOR_JSON_PROMPT, img],
         config=cfg,
@@ -505,12 +515,12 @@ async def analyze_scene_json_from_text_and_palette(
     description_text: str,
     palette_image_path: Optional[Path],
 ) -> Optional[dict]:
-    """JSON-анализ интерьера по тексту и, опционально, палитре."""
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     contents: List[Any] = [INTERIOR_JSON_PROMPT, description_text.strip()]
     if palette_image_path is not None and palette_image_path.exists():
-        img = Image.open(palette_image_path).convert("RGB")
+        img = await asyncio.to_thread(Image.open, palette_image_path)
+        img = await asyncio.to_thread(img.convert, "RGB")
         contents.append(img)
 
     cfg = types.GenerateContentConfig(
@@ -518,7 +528,7 @@ async def analyze_scene_json_from_text_and_palette(
         response_mime_type="application/json",
     )
 
-    resp = client.models.generate_content(
+    resp = await client.aio.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents,
         config=cfg,
@@ -526,27 +536,19 @@ async def analyze_scene_json_from_text_and_palette(
     txt = _resp_text(resp).strip()
     try:
         return json.loads(txt)
-    except Exception as e:
-        print("INTERIOR_JSON_TEXT_PALETTE_PARSE_ERROR:", repr(e))
+    except Exception:
         return _parse_interior_json(txt)
 
 
 
 async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
-    """JSON-анализ интерьера по выбранному стилю (без фото)."""
     client = genai.Client(api_key=GEMINI_API_KEY)
-
-    contents = [
-        INTERIOR_JSON_PROMPT,
-        f"Интерьер в стиле: {style_prompt}",
-    ]
-
+    contents = [INTERIOR_JSON_PROMPT, f"Интерьер в стиле: {style_prompt}"]
     cfg = types.GenerateContentConfig(
         temperature=0.2,
         response_mime_type="application/json",
     )
-
-    resp = client.models.generate_content(
+    resp = await client.aio.models.generate_content(
         model="gemini-2.5-flash",
         contents=contents,
         config=cfg,
@@ -554,10 +556,8 @@ async def analyze_scene_json_from_style(style_prompt: str) -> Optional[dict]:
     txt = _resp_text(resp).strip()
     try:
         return json.loads(txt)
-    except Exception as e:
-        print("INTERIOR_JSON_STYLE_PARSE_ERROR:", repr(e))
+    except Exception:
         return _parse_interior_json(txt)
-
 
 
 
@@ -762,7 +762,10 @@ QUALITY:
 async def gemini_generate(door_png: Path, color_text: str, interior_en: str, aspect: str = "3:4") -> bytes:
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = build_generation_prompt(interior_en=interior_en, door_color_text=color_text)
-    img = Image.open(door_png).convert("RGBA")
+    
+    # Async image load
+    img = await asyncio.to_thread(Image.open, door_png)
+    img = await asyncio.to_thread(img.convert, "RGBA")
 
     cfg = types.GenerateContentConfig(
         response_modalities=["Image"],
@@ -771,7 +774,8 @@ async def gemini_generate(door_png: Path, color_text: str, interior_en: str, asp
         top_p=0.5,
     )
 
-    resp = client.models.generate_content(
+    # Async call
+    resp = await client.aio.models.generate_content(
         model="gemini-2.5-flash-image",
         contents=[prompt, img],
         config=cfg,
@@ -779,16 +783,14 @@ async def gemini_generate(door_png: Path, color_text: str, interior_en: str, asp
     return _resp_image_bytes(resp)
 
 async def gemini_recolor_image(base_image_path: Path, color_text: str, aspect: str = "3:4") -> bytes:
-    """
-    Перекрасить дверь на уже готовом изображении.
-    """
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = textwrap.dedent(f"""
         Change the door color to {color_text}.
         Keep all other elements of the scene exactly the same.
         Do not move the door, do not change its geometry or surroundings.
     """).strip()
-    img = Image.open(base_image_path).convert("RGBA")
+    img = await asyncio.to_thread(Image.open, base_image_path)
+    img = await asyncio.to_thread(img.convert, "RGBA")
 
     cfg = types.GenerateContentConfig(
         response_modalities=["Image"],
@@ -797,25 +799,22 @@ async def gemini_recolor_image(base_image_path: Path, color_text: str, aspect: s
         top_p=0.5,
     )
 
-    resp = client.models.generate_content(
+    resp = await client.aio.models.generate_content(
         model="gemini-2.5-flash-image",
         contents=[prompt, img],
         config=cfg,
     )
     return _resp_image_bytes(resp)
 
-
 async def gemini_edit_image(base_image_path: Path, edit_text: str, aspect: str = "3:4") -> bytes:
-    """
-    Внести правки в сцену по текстовому описанию пользователя.
-    """
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = textwrap.dedent(f"""
         Apply the following modifications to the image: {edit_text}.
         Preserve the door's position, geometry and color unless the instructions explicitly say otherwise.
         Keep the overall style and composition as close as possible to the original.
     """).strip()
-    img = Image.open(base_image_path).convert("RGBA")
+    img = await asyncio.to_thread(Image.open, base_image_path)
+    img = await asyncio.to_thread(img.convert, "RGBA")
 
     cfg = types.GenerateContentConfig(
         response_modalities=["Image"],
@@ -824,7 +823,7 @@ async def gemini_edit_image(base_image_path: Path, edit_text: str, aspect: str =
         top_p=0.5,
     )
 
-    resp = client.models.generate_content(
+    resp = await client.aio.models.generate_content(
         model="gemini-2.5-flash-image",
         contents=[prompt, img],
         config=cfg,
@@ -832,45 +831,33 @@ async def gemini_edit_image(base_image_path: Path, edit_text: str, aspect: str =
     return _resp_image_bytes(resp)
 
 
-def apply_watermark(image_bytes: bytes) -> bytes:
-    """
-    Накладывает большой полупрозрачный водяной знак, растянутый на всё изображение.
-    Если watermark-файл не найден или ошибка — возвращаем исходные байты.
-    """
+# Синхронная "тяжелая" функция (внутренняя)
+def _apply_watermark_sync(image_bytes: bytes) -> bytes:
     try:
         if not WATERMARK_PATH.exists():
             return image_bytes
-
-        # исходное изображение
         base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-
-        # watermark
         wm = Image.open(WATERMARK_PATH).convert("RGBA")
-
-        # Масштабируем watermark так, чтобы он полностью перекрывал изображение
-        # (cover: по большей стороне)
         scale = max(base.width / wm.width, base.height / wm.height)
         target_w = int(wm.width * scale)
         target_h = int(wm.height * scale)
         wm = wm.resize((target_w, target_h), Image.LANCZOS)
-
-        # Ослабляем непрозрачность
         r, g, b, a = wm.split()
         a = a.point(lambda p: int(p * WATERMARK_ALPHA))
         wm = Image.merge("RGBA", (r, g, b, a))
-
-        # Центруем watermark относительно кадра
         x = (base.width - wm.width) // 2
         y = (base.height - wm.height) // 2
-
         base.alpha_composite(wm, dest=(x, y))
-
         out = io.BytesIO()
         base.convert("RGB").save(out, format="PNG")
         return out.getvalue()
     except Exception as e:
         print("WATERMARK_ERROR:", repr(e))
         return image_bytes
+
+# Асинхронная обертка, которую мы будем вызывать
+async def apply_watermark(image_bytes: bytes) -> bytes:
+    return await asyncio.to_thread(_apply_watermark_sync, image_bytes)
 
 from aiogram.types import User
 
@@ -2437,7 +2424,7 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
         await state.clear()
         return
 
-    # 1) Сообщение ожидания + стикер-песочные часы
+    # 1) Сообщение ожидания (ВЕРНУЛ ПОЛНЫЙ ТЕКСТ)
     await show_loading(
         m,
         state,
@@ -2452,9 +2439,9 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
     typing_task = asyncio.create_task(
         run_chat_action(m.chat.id, ChatAction.UPLOAD_PHOTO, typing_stop)
     )
-# ВНУТРИ try блока, где происходит генерация и отправка:
+    
     try:
-        # Генерация изображения двери
+        # Генерация изображения (Асинхронная Gemini)
         img_bytes = await gemini_generate(
             door_png=door_png,
             color_text=color_text,
@@ -2462,16 +2449,19 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
             aspect="3:4",
         )
 
+        # Водяной знак (в отдельном потоке)
         if should_apply_watermark(user):
-            img_bytes = apply_watermark(img_bytes)
+            img_bytes = await apply_watermark(img_bytes)
 
-        # Сохраняем на диск
+        # Сохраняем на диск (АСИНХРОННО через aiofiles)
         result_dir = Path("work") / str(m.from_user.id)
         result_dir.mkdir(parents=True, exist_ok=True)
         result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
-        result_path.write_bytes(img_bytes)
+        
+        async with aiofiles.open(result_path, 'wb') as f:
+            await f.write(img_bytes)
 
-        # Отправляем фото и СОХРАНЯЕМ file_id
+        # Отправляем фото
         sent_msg = None
         try:
             file = BufferedInputFile(img_bytes, filename="result.png")
@@ -2479,7 +2469,7 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
                 photo=file,
                 caption=(
                     f"{door['name']} — выбранный цвет: {color_text}\n"
-                    f"Дверь по центру задней стены, полностью видима."
+                    f"Дверь по центру задней стены, полностью видима (ничем не закрыта)."
                 ),
             )
         except Exception:
@@ -2488,9 +2478,8 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
                 photo=FSInputFile(str(result_path)),
                 caption=f"{door['name']} — выбранный цвет: {color_text}",
             )
-            # Примечание: здесь сложнее достать file_id, но это редкий кейс
 
-        # --- ВАЖНОЕ ИЗМЕНЕНИЕ: СОХРАНЯЕМ file_id ---
+        # Сохраняем file_id для восстановления (если диск очистится)
         file_id_to_save = None
         if sent_msg and sent_msg.photo:
             # Берем самый большой размер фото
@@ -2500,20 +2489,18 @@ async def generate_and_send(m: Message, state: FSMContext, user: User):
             last_result_path=str(result_path),
             last_color_text=color_text,
             last_door_id=door_id,
-            last_result_file_id=file_id_to_save # <--- ДОБАВИЛИ ЭТО
+            last_result_file_id=file_id_to_save  # <--- Важно для восстановления
         )
 
     except Exception as e:
-        # ... (обработка ошибок, как была) ...
         print("GENERATION_ERROR:", repr(e))
-        await m.answer("⚠️ Ошибка генерации.")
+        await m.answer("⚠️ Не удалось сгенерировать изображение. Проверьте ключи и попробуйте ещё раз.")
     finally:
         typing_stop.set()
         try:
             await typing_task
         except Exception:
             pass
-        # 2) Убираем сообщение ожидания и стикер
         await clear_loading(m.chat.id, state)
 
     # 3) Спрашиваем, что делать дальше
@@ -2530,8 +2517,7 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
     data = await state.get_data()
     color_text = data.get("color_text", "")
 
-    # --- ИЗМЕНЕНИЕ: ИСПОЛЬЗУЕМ ФУНКЦИЮ ВОССТАНОВЛЕНИЯ ---
-    # Вместо прямой проверки Path.exists(), просим функцию найти или скачать файл
+    # Ищем файл на диске или восстанавливаем через Telegram
     current_image_path = await get_or_recover_image(state, bot)
 
     if not current_image_path or not current_image_path.exists():
@@ -2546,7 +2532,8 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
     await show_loading(
         m,
         state,
-        "⏳ Перекрашиваем дверь в новый цвет…",
+        "⏳ Перекрашиваем дверь в новый цвет…\n\n"
+        "Стараемся сохранить весь интерьер таким, как был.",
     )
 
     typing_stop = asyncio.Event()
@@ -2558,14 +2545,17 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
         # Используем current_image_path, который мы восстановили
         img_bytes = await gemini_recolor_image(current_image_path, color_text)
 
+        # Накладываем водяной знак (асинхронно)
         if should_apply_watermark(user):
-            img_bytes = apply_watermark(img_bytes)
+            img_bytes = await apply_watermark(img_bytes)
 
-        # Сохраняем результат
+        # Сохраняем результат (асинхронно)
         result_dir = Path("work") / str(m.from_user.id)
         result_dir.mkdir(parents=True, exist_ok=True)
         result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
-        result_path.write_bytes(img_bytes)
+        
+        async with aiofiles.open(result_path, 'wb') as f:
+            await f.write(img_bytes)
         
         # Отправляем
         sent_msg = None
@@ -2576,14 +2566,16 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
                 caption=f"Новый цвет двери: {color_text}",
             )
         except Exception:
+            # Fallback
             tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
-            tmp.write_bytes(img_bytes)
+            async with aiofiles.open(tmp, 'wb') as f:
+                await f.write(img_bytes)
             sent_msg = await m.answer_photo(
                 photo=FSInputFile(str(tmp)),
                 caption=f"Новый цвет двери: {color_text}",
             )
 
-        # --- ИЗМЕНЕНИЕ: СОХРАНЯЕМ НОВЫЙ file_id ---
+        # Сохраняем новый file_id
         new_file_id = None
         if sent_msg and sent_msg.photo:
             new_file_id = sent_msg.photo[-1].file_id
@@ -2591,7 +2583,7 @@ async def recolor_last_result(m: Message, state: FSMContext, user: User):
         await state.update_data(
             last_result_path=str(result_path), 
             last_color_text=color_text,
-            last_result_file_id=new_file_id # <--- ОБНОВЛЯЕМ ID
+            last_result_file_id=new_file_id 
         )
 
     except Exception as e:
@@ -2729,7 +2721,7 @@ async def handle_image_edit(m: Message, state: FSMContext):
         await m.answer("Пожалуйста, опишите, что нужно изменить в сцене.")
         return
 
-    # --- ИЗМЕНЕНИЕ: ВОССТАНАВЛИВАЕМ ФАЙЛ ---
+    # Восстанавливаем файл, если он пропал с диска
     current_image_path = await get_or_recover_image(state, bot)
 
     if not current_image_path or not current_image_path.exists():
@@ -2748,39 +2740,44 @@ async def handle_image_edit(m: Message, state: FSMContext):
     )
 
     try:
-        # Используем current_image_path
+        # Редактируем через Gemini (асинхронно)
         img_bytes = await gemini_edit_image(current_image_path, edit_text)
 
+        # Накладываем водяной знак (асинхронно)
         if should_apply_watermark(m.from_user):
-            img_bytes = apply_watermark(img_bytes)
+            img_bytes = await apply_watermark(img_bytes)
 
+        # Сохраняем результат на диск (асинхронно)
         result_dir = Path("work") / str(m.from_user.id)
         result_dir.mkdir(parents=True, exist_ok=True)
         result_path = result_dir / f"result_{uuid.uuid4().hex}.png"
-        result_path.write_bytes(img_bytes)
         
+        async with aiofiles.open(result_path, 'wb') as f:
+            await f.write(img_bytes)
+        
+        # Отправляем фото пользователю
         sent_msg = None
         try:
             file = BufferedInputFile(img_bytes, filename="result_edit.png")
             sent_msg = await m.answer_photo(photo=file, caption="Сцена с учётом ваших правок.")
         except Exception:
-            tmp = Path("/tmp") / f"{uuid.uuid4().hex}.png"
-            tmp.write_bytes(img_bytes)
-            sent_msg = await m.answer_photo(photo=FSInputFile(str(tmp)), caption="Сцена с учётом ваших правок.")
+            # Fallback: если BufferedInputFile не сработал, пробуем отправить с диска
+            # Но сначала убедимся, что файл записан (он записан выше)
+            sent_msg = await m.answer_photo(photo=FSInputFile(str(result_path)), caption="Сцена с учётом ваших правок.")
 
-        # --- ИЗМЕНЕНИЕ: СОХРАНЯЕМ НОВЫЙ file_id ---
+        # Сохраняем новый file_id для будущего восстановления
         new_file_id = None
         if sent_msg and sent_msg.photo:
             new_file_id = sent_msg.photo[-1].file_id
 
         await state.update_data(
             last_result_path=str(result_path),
-            last_result_file_id=new_file_id # <--- ОБНОВЛЯЕМ
+            last_result_file_id=new_file_id 
         )
 
     except Exception as e:
         print("EDIT_IMAGE_ERROR:", repr(e))
-        await m.answer("⚠️ Не удалось применить правки.")
+        await m.answer("⚠️ Не удалось применить правки. Попробуйте переформулировать запрос.")
     finally:
         typing_stop.set()
         try:
@@ -2792,7 +2789,6 @@ async def handle_image_edit(m: Message, state: FSMContext):
     kb = build_after_result_keyboard()
     await send_step_message(m, state, "Что дальше?", reply_markup=kb)
     await state.set_state(Flow.after_result)
-
 
 @router.callback_query(Flow.recolor_selecting_color, F.data.startswith("color_idx:"))
 async def recolor_color_from_list(cb: CallbackQuery, state: FSMContext):
