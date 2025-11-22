@@ -698,7 +698,7 @@ async def describe_scene_with_gemini(image_path: Path) -> Tuple[str, List[Dict[s
     img = Image.open(image_path).convert("RGB")
 
     resp = client.models.generate_content(
-        model="gemini-3-pro-preview",
+        model="gemini-2.5-flash",
         contents=[schema_prompt, img],
         config=types.GenerateContentConfig(temperature=0.2),
     )
@@ -768,7 +768,7 @@ async def describe_scene_from_text_and_palette(
         contents.append(img)
 
     resp = client.models.generate_content(
-        model="gemini-3-pro-preview",
+        model="gemini-2.5-flash",
         contents=contents,
         config=types.GenerateContentConfig(temperature=0.2),
     )
@@ -815,7 +815,7 @@ async def describe_scene_from_style(style_prompt: str) -> Tuple[str, List[Dict[s
     """).strip()
 
     resp = client.models.generate_content(
-        model="gemini-3-pro-preview",
+        model="gemini-2.5-flash",
         contents=[base_prompt],
         config=types.GenerateContentConfig(temperature=0.2),
     )
